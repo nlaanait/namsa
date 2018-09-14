@@ -1,4 +1,4 @@
-from .supercell import SupercellBuilder
+from namsa.supercell import SupercellBuilder
 import unittest
 import numpy as np
 
@@ -42,7 +42,7 @@ class TestSupercellBuilder(unittest.TestCase):
         spbuild.transform_unit_cell()
         spbuild.build_unit_cell()
         spbuild.make_orthogonal_supercell()
-        test_xyz = spbuild.supercell_sites
+        test_xyz = spbuild.supercell_xyz_positions
         true_xyz = np.loadtxt('cif_files/supercell_mvc-9418.xyz', skiprows=2, dtype=spbuild.xyz_dtype)
         true_pos = np.column_stack([true_xyz['x'], true_xyz['y'], true_xyz['z']])
         test_pos = np.column_stack([test_xyz['x'], test_xyz['y'], test_xyz['z']])

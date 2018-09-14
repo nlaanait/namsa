@@ -66,9 +66,14 @@ class SupercellBuilder(object):
         # housekeeping
         self.debug = debug
         self.verbose = verbose
+        # dtypes for numpy structured arrays
         self.sites_dtype = [('atom_type', '|U16'), ('atomic_number', 'i'), ('frac_x', 'f'), ('frac_y', 'f'),
                             ('frac_z', 'f'), ('occ', 'f'), ('DW', 'f')]
+        self.supercell_sites_dtype = [('atom_type', '|U16'), ('atomic_number', 'i'), ('x', 'f'), ('y', 'f'), ('z', 'f'),
+                                      ('occ', 'f'), ('DW', 'f')]
         self.xyz_dtype = [('atom_type', '|U16'), ('x', 'f'), ('y', 'f'), ('z', 'f')]
+        self.XYZ_dtype = [('atomic_number', 'i'), ('Y', 'f'), ('X', 'f'), ('Z', 'f'), ('occ', 'f'), ('DW', 'f')]
+        # initializing matrices
         self.p_mat = np.identity(3)
         self.P_mat = np.identity(4)
         self.Q_mat = np.identity(4)
@@ -295,8 +300,7 @@ class SupercellBuilder(object):
         XYZ_arr = np.array([(atom_number, frac_x, frac_y, frac_z, occ, dw)
                                       for atom_number, (frac_x, frac_y, frac_z), occ, dw in
                                       zip(atomic_numbers, xyz_cell_positions, site_occps, DWs)],
-                                     dtype=[('atomic_number', 'i'), ('Y', 'f'), ('X', 'f'), ('Z', 'f'), ('occ', 'f'),
-                                            ('DW', 'f')])
+                                     dtype= self.XYZ_dtype)
 
         np.savetxt(filepath, XYZ_arr, fmt='  %d  %2.4f  %2.4f  %2.4f  %2.4f  %2.4f',
                    header='#\n      %2.4f %2.4f %2.4f' % (cell_dims[0], cell_dims[1], cell_dims[2]),
@@ -430,23 +434,31 @@ class SupercellBuilder(object):
             mask = np.logical_and(pos >= 0, pos <= supercell_size).all(axis=1)
             xyz_pos_arr = pos[mask]
             supercell_site = np.array([(site['atom_type'], site['atomic_number'], x, y, z, site['occ'], site['DW'])
-                                       for (x, y, z) in xyz_pos_arr], dtype=[('atom_type', '|U16'), ('atomic_number', 'i'),
-                                                                             ('x', 'f'), ('y', 'f'), ('z', 'f'),
-                                                                             ('occ', 'f'), ('DW', 'f')])
+                                       for (x, y, z) in xyz_pos_arr], dtype=self.supercell_sites_dtype)
 
             supercell_sites.append(supercell_site)
         self.supercell_sites = np.sort(np.concatenate(supercell_sites), axis=0)
+        self.supercell_xyz_positions = np.array([(atom_type, x, y, z)
+                                                 for atom_type, x, y, z in zip(self.supercell_sites['atom_type'],
+                                                                                 self.supercell_sites['x'],
+                                                                                 self.supercell_sites['y'],
+                                                                                 self.supercell_sites['z'])],
+                                                dtype=self.xyz_dtype)
+
 
         if xyz is not None:
-            xyz_arr = np.column_stack([self.supercell_sites['atom_type'], self.supercell_sites['x'],
-                                       self.supercell_sites['y'], self.supercell_sites['z']])
-            self.to_xyz(xyz, xyz_arr)
+            self.to_xyz(xyz, self.supercell_xyz_positions)
             self.print_verbose('saving xyz file %s' % xyz)
         if XYZ is not None:
-            xyz_arr = np.column_stack([self.supercell_sites['atomic_number'], self.supercell_sites['x'],
-                                       self.supercell_sites['y'], self.supercell_sites['z'], self.supercell_sites['occ'],
-                                       self.supercell_sites['DW']])
-            self.to_XYZ(XYZ, xyz_arr)
+            self.XYZ_positions = np.array([(Z, x, y, z, occ, dw)
+                                                 for Z, x, y, z, occ, dw in zip(self.supercell_sites['atomic_number'],
+                                                                                 self.supercell_sites['x'],
+                                                                                 self.supercell_sites['y'],
+                                                                                 self.supercell_sites['z'],
+                                                                                 self.supercell_sites['occ'],
+                                                                                 self.supercell_sites['DW'])],
+                                          dtype=self.XYZ_dtype)
+            self.to_XYZ(XYZ, self.XYZ_positions)
             self.print_verbose('saving XYZ file %s' % XYZ)
 
 
