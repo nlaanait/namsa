@@ -9,7 +9,8 @@ setup(
     author='Numan Laanait',
     author_email='laanaitn@ornl.gov',
     description='',
-    install_requires=['pymatgen', 'numpy', 'pycuda', 'scikit-cuda'],
+    #install_requires=['pymatgen', 'numpy', 'pycuda', 'scikit-cuda'],
+    install_requires=['numpy', 'pymatgen', 'pybtex'],
     test_suite='tests',
     python_requires='>=3.6'
 )
