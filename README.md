@@ -1,4 +1,4 @@
-# `NAMSA` 
+# ``NAMSA`` 
 (**N**ot **A**ny **M**ulti-**S**lice **A**lgorithm) 
 
 Python Project for multi-slice algorithm based simulations of dynamical electron diffraction. 
@@ -13,5 +13,6 @@ Python Project for multi-slice algorithm based simulations of dynamical electron
 ```
 python setup.py install
 python setup.py test
+python -m unittest tests/*.py
 ```
 
