@@ -64,10 +64,12 @@ def make_label_sim_json(structure, space_group, unit_cell, supercell_size, outpu
     with open(os.path.join(direc, output_name + '.json'), mode='w+') as f:
         json.dump(out_dic, f, indent=4)
 
+
 def pop_DS(lst):
     for (i, itm) in enumerate(lst):
         if '.DS_Store' in itm:
             lst.pop(i)
+
 
 def get_random_cif(root_path):
     # get space group folders
@@ -83,6 +85,7 @@ def get_random_cif(root_path):
     cif_name = crystal_files[idx]
     cif_path = os.path.join(os.path.join(root_path, space_group_dir), cif_name)
     return cif_name.split('.')[0], cif_path, space_group_dir
+
 
 def dhkl_spacing(uc_volume, basis, hkl=[0, 0, 1]):
     a1, a2, a3 = basis

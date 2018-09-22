@@ -2,6 +2,7 @@ import numpy as np
 from pymatgen.core import Element
 from pymatgen.io.cif import CifParser
 from itertools import chain
+from warnings import warn
 
 
 class Centerings(object):
@@ -72,7 +73,7 @@ class SupercellBuilder(object):
         self.supercell_sites_dtype = [('atom_type', '|U16'), ('atomic_number', 'i'), ('x', 'f'), ('y', 'f'), ('z', 'f'),
                                       ('occ', 'f'), ('DW', 'f')]
         self.xyz_dtype = [('atom_type', '|U16'), ('x', 'f'), ('y', 'f'), ('z', 'f')]
-        self.XYZ_dtype = [('atomic_number', 'i'), ('Y', 'f'), ('X', 'f'), ('Z', 'f'), ('occ', 'f'), ('DW', 'f')]
+        self.XYZ_dtype = [('atomic_number', 'i'), ('x', 'f'), ('y', 'f'), ('z', 'f'), ('occ', 'f'), ('DW', 'f')]
         # initializing matrices
         self.p_mat = np.identity(3)
         self.P_mat = np.identity(4)
@@ -280,32 +281,43 @@ class SupercellBuilder(object):
         self.xyz_positions = np.array([(atom_type, frac_x, frac_y, frac_z) for atom_type, (frac_x, frac_y, frac_z)
                                        in zip(atom_types, xyz_cell_positions)], dtype=self.xyz_dtype)
         if xyz is not None:
-            self.to_xyz(xyz)
+            self.to_xyz(xyz, supercell=False)
 
 
-    def to_xyz(self, filepath, xyz_arr=None):
-        if xyz_arr is not None:
-            np.savetxt(filepath, xyz_arr, fmt='%s    %2.4f    %2.4f    %2.4f',
-                       header='%s\n' % str(xyz_arr.shape[0]), comments='')
+    def to_xyz(self, filepath, supercell=False):
+        if supercell:
+            cell = self.supercell_xyz_positions
         else:
-            np.savetxt(filepath, self.xyz_positions, fmt='%s    %2.4f    %2.4f    %2.4f',
-                       header='%s\n' % str(xyz_arr.shape[0]), comments='')
+            cell = self.unit_cell_positions
+        xyz_arr = np.array([(atom_type, x, y, z) for atom_type, x, y, z in zip(cell['atom_type'], cell['x'], cell['y'],
+                                                                               cell['z'])], dtype=self.xyz_dtype)
+        try:
+            np.savetxt(filepath, xyz_arr, fmt='%s    %2.4f    %2.4f    %2.4f', header='%s\n' % str(xyz_arr.shape[0]),
+                       comments='')
+            return True
+        except FileNotFoundError:
+            warn('File error!')
+            return False
 
-    def to_XYZ(self, filepath):
-        atomic_numbers = self.unit_cell_positions['atomic_number']
-        xyz_cell_positions = np.column_stack([self.xyz_positions['x'],self.xyz_positions['y'],self.xyz_positions['z']])
-        cell_dims = xyz_cell_positions.max(0) - xyz_cell_positions.min(0)
-        site_occps = self.unit_cell_positions['occ']
-        DWs = self.unit_cell_positions['DW']
-        XYZ_arr = np.array([(atom_number, frac_x, frac_y, frac_z, occ, dw)
-                                      for atom_number, (frac_x, frac_y, frac_z), occ, dw in
-                                      zip(atomic_numbers, xyz_cell_positions, site_occps, DWs)],
-                                     dtype= self.XYZ_dtype)
 
-        np.savetxt(filepath, XYZ_arr, fmt='  %d  %2.4f  %2.4f  %2.4f  %2.4f  %2.4f',
-                   header='#\n      %2.4f %2.4f %2.4f' % (cell_dims[0], cell_dims[1], cell_dims[2]),
-                   footer='-1',
-                   comments='')
+    def to_XYZ(self, filepath, supercell=False):
+        if supercell:
+            cell = self.supercell_sites
+        else:
+            cell = self.unit_cell_positions
+
+        XYZ_arr = np.array([(atomic_number, x, y, z, occ, dw) for atomic_number, x, y, z, occ, dw in
+                            zip(cell['atomic_number'], cell['x'], cell['y'], cell['z'], cell['occ'], cell['DW'])],
+                           dtype=self.XYZ_dtype)
+        cell_dims = [XYZ_arr['x'].max(0), XYZ_arr['x'].max(0), XYZ_arr['z'].max(0)]
+        try:
+            np.savetxt(filepath, XYZ_arr, fmt='  %d  %2.4f  %2.4f  %2.4f  %2.4f  %2.4f',
+                       header='#\n      %2.4f %2.4f %2.4f' % (cell_dims[0], cell_dims[1], cell_dims[2]), footer='-1',
+                       comments='')
+            return True
+        except FileNotFoundError:
+            warn('File error!')
+            return False
 
     def CartesianBasis(self):
         # Construct Orthogonal Lattice basis
@@ -447,18 +459,10 @@ class SupercellBuilder(object):
 
 
         if xyz is not None:
-            self.to_xyz(xyz, self.supercell_xyz_positions)
+            self.to_xyz(xyz, supercell=True)
             self.print_verbose('saving xyz file %s' % xyz)
         if XYZ is not None:
-            self.XYZ_positions = np.array([(Z, x, y, z, occ, dw)
-                                                 for Z, x, y, z, occ, dw in zip(self.supercell_sites['atomic_number'],
-                                                                                 self.supercell_sites['x'],
-                                                                                 self.supercell_sites['y'],
-                                                                                 self.supercell_sites['z'],
-                                                                                 self.supercell_sites['occ'],
-                                                                                 self.supercell_sites['DW'])],
-                                          dtype=self.XYZ_dtype)
-            self.to_XYZ(XYZ, self.XYZ_positions)
+            self.to_XYZ(XYZ, supercell=True)
             self.print_verbose('saving XYZ file %s' % XYZ)
 
 
