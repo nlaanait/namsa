@@ -69,8 +69,9 @@ class MSA(object):
         self.kpix_size = self.kmax/self.sampling
         self.sigma = sigma_int(self.E*1e3)
         print('Simulation Parameters:\nSupercell dimensions xyz:%s (Å)\nReal, Reciprocal space pixel sizes:%s Å, %s 1/Å'
-              '\nMax angle: %2.2f (rad)\nSampling in real and reciprocal space: %s pixels' 
-              %(format(np.round(self.dims,2)), format(np.round(self.pix_size,2)), format(np.round(self.kpix_size,2)), self.max_ang, format(self.sampling)))
+              '\nMax angle: %2.2f (rad)\nSampling in real and reciprocal space: %s pixels' %
+              (format(np.round(self.dims, 2)), format(np.round(self.pix_size, 2)), format(np.round(self.kpix_size, 2)),
+               self.max_ang, format(self.sampling)))
 
     def calc_atomic_potentials(self, potential_range=8, oversample=2, kirkland=True):
         if kirkland:
@@ -86,7 +87,7 @@ class MSA(object):
     def build_potential_slices(self, slice_thickness):
         self.slice_t = slice_thickness
         num_slices = np.int(np.floor(self.dims[-1] / slice_thickness))
-        tasks = [((self, slice_num),{'method':'build_slices'}) for slice_num in range(num_slices)]
+        tasks = [((self, slice_num), {'method':'build_slices'}) for slice_num in range(num_slices)]
         processes = min(mp.cpu_count(), num_slices)
         chunk = np.int(np.floor(num_slices / processes))
         with mp.Pool(processes=processes, maxtasksperchild=1) as pool:
@@ -94,11 +95,12 @@ class MSA(object):
             potential_slices = np.array([j for j in jobs])
         self.potential_slices = potential_slices.astype(np.float32)
 
+
     def make_slice(self, args):
         slice_num = args
         mask = np.logical_and(self.supercell_xyz[:, -1] >= slice_num * self.slice_t,
                               self.supercell_xyz[:, -1] < (slice_num + 1) * self.slice_t)
-        # TODO create empty slice that is byte aligned
+        # TODO create empty slice that is byte aligned using fftw
         arr_slice = np.zeros(self.sampling, dtype=np.float32)
         for Z, xyz in zip(self.supercell_Z[mask], self.supercell_xyz[mask]):
             pot = self.cached_pots[Z]
@@ -112,7 +114,6 @@ class MSA(object):
             repl_shape = arr_slice[repl_y, repl_x].shape
             arr_slice[repl_y, repl_x] += pot[offset_y:repl_shape[0] + offset_y, offset_x:repl_shape[1] + offset_x]
         return arr_slice
-
 
     @staticmethod
     def _get_potential(grid_x, grid_y, params, oversample):
