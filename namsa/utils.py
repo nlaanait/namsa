@@ -95,3 +95,13 @@ def dhkl_spacing(uc_volume, basis, hkl=[0, 0, 1]):
     d_hkl_rep = np.sqrt(np.dot(d_hkl_rep_vec, d_hkl_rep_vec))
     d_hkl = 1. / d_hkl_rep
     return d_hkl
+
+
+def bin_2d_array(arr, dwnspl=2, mode='mean'):
+    init_shape = arr.shape
+    arr = arr.reshape(init_shape[0] // dwnspl, dwnspl, init_shape[1] // dwnspl, dwnspl)
+    if mode == 'mean':
+        arr = arr.mean(-1).mean(-2)
+    else:
+        arr = arr.sum(-1).sum(-2)
+    return arr

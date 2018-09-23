@@ -1,4 +1,5 @@
 import numpy as np
+from scipy.constants import speed_of_light, electron_mass, elementary_charge
 
 def voltage2Lambda(voltage):
     """
@@ -64,3 +65,39 @@ def overlap_params(overlap, d_hkl, Lambda):
     C_3 = (theta_c / 1.51) ** (-4) * Lambda
     defocus = -1.15 * C_3 ** (-1. / 4) * Lambda ** (-3. / 4)
     return theta_c * 1e3, C_3 * 1.e-6, defocus
+
+def scherzer_params(Lambda, Cs):
+    defocus = np.sqrt(1.5) * np.sqrt(Cs * Lambda)
+    aperture = (6 * Lambda / Cs) ** 1/4
+    return defocus, aperture
+
+def spherical_phase_error(k_rad, Lambda, scherzer=False, **kwargs):
+    """
+    Return phase error due to rotation invariant aberration function.
+    :param k_rad: radial K-vector.
+    :param Lambda: wavelength
+    :param scherzer: bool, True: use Scherzer defocus.
+    :param kwargs: keys: 'C1': |defocus|; 'C3': spherical aberration, 3rd Cs; 'C5': 5th-order Cs. If not specified, no
+    aberrations.
+    :return: exp(-i * chi), chi is aberration function.
+    """
+
+    C1 = kwargs.get('C1', 0.)
+    C3 = kwargs.get('C3', 0.)
+    C5 = kwargs.get('C5', 0.)
+    if scherzer:
+        C1, _ = scherzer_params(Lambda, C3)
+    chi = 2 * np.pi / Lambda * (-1/2 * C1 * (k_rad * Lambda) ** 2 + 1/4 * C3 * (k_rad * Lambda) ** 4 + 1/6 * C5 *
+                                (k_rad * Lambda) ** 6)
+    return np.exp(-1.j * chi)
+
+
+def sigma_int(V):
+    """
+    Interaction Parameter (units of radians/eV/Å)
+    Params:
+    V: accelerating voltage in Volts
+    """
+    sigma = 2*np.pi*(electron_mass*speed_of_light**2 + elementary_charge*V)/(2*electron_mass*speed_of_light**2 +
+                                                                             elementary_charge*V)/(voltage2Lambda(V)*V)
+    return sigma
