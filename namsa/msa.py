@@ -12,12 +12,13 @@ import os
 XYZ_dtype = [('atomic_number', 'i'), ('x', 'f'), ('y', 'f'), ('z', 'f'), ('occ', 'f'), ('DW', 'f')]
 
 
-def unwrap(*args, **kwargs):
+def unwrap(args):
+    (msa, params), kwargs = args
     method_name = kwargs.pop('method')
     if method_name == 'build_slices':
-        return MSA.make_slice(args)
+        return MSA.make_slice(msa, params)
     elif method_name == 'propagate_probes':
-        return MSA.propagate_probes(args, kwargs)
+        return MSA.propagate_probes(msa, params, kwargs)
 
 
 class MSA(object):
@@ -56,16 +57,18 @@ class MSA(object):
         self.dims = self.supercell_xyz.max(0) - self.supercell_xyz.min(0)
         if max_angle is None:
             self.sampling = sampling
-            self.kmax = np.min(self.sampling/self.dims)
+            self.kmax = np.min(self.sampling/self.dims[:2])
             self.max_ang = self.kmax * self.Lambda
         else:
             self.max_ang = max_angle
             self.kmax = self.max_ang / self.Lambda
-            self.sampling = np.floor(self.kmax * self.dims)
-        self.pix_size = self.dims / self.sampling
+            self.sampling = np.floor(self.kmax * self.dims[:2])
+        self.pix_size = self.dims[:2] / self.sampling
+        self.kpix_size = self.kmax/self.sampling
         self.sigma = sigma_int(self.E*1e3)
         print('Simulation Parameters:\nSupercell dimensions xyz:%s (Å)\nReal, Reciprocal space pixel sizes:%s Å, %s 1/Å'
-              '\nMax angle: %2.2f (rad)\nSampling in real and reciprocal space: % pixels')
+              '\nMax angle: %2.2f (rad)\nSampling in real and reciprocal space: %s pixels' 
+              %(format(np.round(self.dims,2)), format(np.round(self.pix_size,2)), format(np.round(self.kpix_size,2)), self.max_ang, format(self.sampling)))
 
 
     def calc_atomic_potentials(self, potential_range=8, oversample=2, kirkland=True):
@@ -81,16 +84,17 @@ class MSA(object):
 
     def build_potential_slices(self, slice_thickness):
         self.slice_t = slice_thickness
-        num_slices = np.int(np.round(self.dim[-1] / slice_thickness))
-        tasks = [slice_num for slice_num in range(num_slices)]
+        num_slices = np.int(np.floor(self.dims[-1] / slice_thickness))
+        tasks = [((self, slice_num),{'method':'build_slices'}) for slice_num in range(num_slices)]
         processes = min(mp.cpu_count(), num_slices)
-        chunk = np.floor(num_slices / processes)
+        chunk = np.int(np.floor(num_slices / processes))
         with mp.Pool(processes=processes, maxtasksperchild=1) as pool:
-            jobs = pool.imap(unwrap(method='build_slices'), tasks, chunksize=chunk)
+            jobs = pool.imap(unwrap, tasks, chunksize=chunk)
             potential_slices = np.array([j for j in jobs])
 
         self.potential_slices = potential_slices
-
+        
+    
     def make_slice(self, args):
         slice_num = args
         mask = np.logical_and(self.supercell_xyz[:, -1] >= slice_num * self.slice_t,
@@ -108,7 +112,6 @@ class MSA(object):
             offset_x = abs(min(x_start, 0))
             repl_shape = arr_slice[repl_y, repl_x].shape
             arr_slice[repl_y, repl_x] += pot[offset_y:repl_shape[0] + offset_y, offset_x:repl_shape[1] + offset_x]
-
         return arr_slice
 
 

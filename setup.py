@@ -12,5 +12,8 @@ setup(
     #install_requires=['pymatgen', 'numpy', 'pycuda', 'scikit-cuda'],
     install_requires=['numpy', 'scipy', 'pymatgen', 'pybtex'],
     test_suite='tests',
-    python_requires='>=3.6'
+    python_requires='>=3.6',
+    package_dir = {'namsa': 'namsa'},
+    package_data = {'namsa': 'scattering_database/*.npy'},
+    include_package_data=True
 )
