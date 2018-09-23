@@ -71,7 +71,7 @@ def scherzer_params(Lambda, Cs):
     aperture = (6 * Lambda / Cs) ** 1/4
     return defocus, aperture
 
-def spherical_phase_error(k_rad, Lambda, scherzer=False, **kwargs):
+def spherical_phase_error(k_rad, Lambda, scherzer, **kwargs):
     """
     Return phase error due to rotation invariant aberration function.
     :param k_rad: radial K-vector.
@@ -82,11 +82,15 @@ def spherical_phase_error(k_rad, Lambda, scherzer=False, **kwargs):
     :return: exp(-i * chi), chi is aberration function.
     """
 
-    C1 = kwargs.get('C1', 0.)
-    C3 = kwargs.get('C3', 0.)
-    C5 = kwargs.get('C5', 0.)
+    # C1 = kwargs.get('C1', 0.)
+    C1 = kwargs['C1']
+    C3 = kwargs['C3']
+    C5 = kwargs['C5']
     if scherzer:
-        C1, _ = scherzer_params(Lambda, C3)
+        if C3 > 1.0:
+            C1, _ = scherzer_params(Lambda, C3)
+        else:
+            print('Spherical Aberration is too small!! Not using Scherzer condition.')
     chi = 2 * np.pi / Lambda * (-1/2 * C1 * (k_rad * Lambda) ** 2 + 1/4 * C3 * (k_rad * Lambda) ** 4 + 1/6 * C5 *
                                 (k_rad * Lambda) ** 6)
     return np.exp(-1.j * chi)
