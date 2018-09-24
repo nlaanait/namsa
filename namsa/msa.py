@@ -4,9 +4,11 @@ from .utils import *
 import numpy as np
 from scipy.special import k0
 import multiprocessing as mp
+import ctypes
 import sys
 from warnings import warn
 import os
+import pyfftw
 
 
 XYZ_dtype = [('atomic_number', 'i'), ('x', 'f'), ('y', 'f'), ('z', 'f'), ('occ', 'f'), ('DW', 'f')]
@@ -62,7 +64,7 @@ class MSA(object):
         else:
             self.max_ang = max_angle
             self.kmax = self.max_ang / self.Lambda
-            self.sampling = np.floor(self.kmax * self.dims[:2])
+            self.sampling = np.floor(self.kmax * self.dims[:2]).astype(np.int)
         self.pix_size = self.dims[:2] / self.sampling
         self.kpix_size = self.kmax/self.sampling
         self.sigma = sigma_int(self.E*1e3)
@@ -71,13 +73,12 @@ class MSA(object):
               (format(np.round(self.dims, 2)), format(np.round(self.pix_size, 2)), format(np.round(self.kpix_size, 2)),
                self.max_ang, format(self.sampling)))
 
-
     def calc_atomic_potentials(self, potential_range=8, oversample=2, kirkland=True):
         if kirkland:
             self.scattering_params = kirkland_params
             #TODO: Figure out how to calculate scattering potential using different methods
         start = potential_range / 2
-        step_x, step_y = 1.j * (np.floor(potential_range/self.pix_size)) * oversample
+        step_x, step_y = 1.j * np.floor(potential_range/self.pix_size).astype(np.int) * oversample
         grid_x, grid_y = np.mgrid[-start:start:step_x, -start:start:step_y]
         self.cached_pots = dict()
         for Z in np.unique(self.supercell_Z):
@@ -92,8 +93,8 @@ class MSA(object):
         with mp.Pool(processes=processes, maxtasksperchild=1) as pool:
             jobs = pool.imap(unwrap, tasks, chunksize=chunk)
             potential_slices = np.array([j for j in jobs])
+        self.potential_slices = potential_slices.astype(np.float32)
 
-        self.potential_slices = potential_slices
 
     def make_slice(self, args):
         slice_num = args
@@ -130,7 +131,8 @@ class MSA(object):
         v = sum_v.sum(-1)
         potential = bin_2d_array(v, dwnspl=oversample, mode='mean')
         potential -= potential.min()
-        return potential.astype(np.float32)
+        return potential
+
 
     def build_probe(self, probe_position=np.array([0.,0.]), smooth_apert=True, apert_smooth=50, spherical_phase=True,
                     aberration_args={'C1':0., 'C3': 0., 'C5': 0.}, scherzer=True):
@@ -141,27 +143,93 @@ class MSA(object):
         k_semi = self.semi_ang/self.Lambda
 
         # aperture function
-        aperture = np.heaviside(k_semi - k_rad, 0.5)
         if smooth_apert:
             aperture = 1 / (1 + np.exp(-2 * apert_smooth * (k_semi - k_rad)))
+        else:
+            aperture = np.heaviside(k_semi - k_rad, 0.5)
 
         # aberration
         if spherical_phase:
-            phase_error = spherical_phase_error(k_rad, self.Lambda, scherzer, **aberration_args)
+            phase_error = spherical_phase_error(k_rad, self.Lambda, scherzer, **aberration_dict)
+
         else:
             pass
             #TODO: implement non-rotationally invariant phase error
 
         # probe wavefunction
         psi_k = aperture * phase_error
+        psi_k = psi_k.astype(np.complex64)
         y, x = probe_position
         kr = k_x * x + k_y * y
-        phase_shift = np.exp(2 * np.pi * 1.j * kr)
-        psi_x = np.fft.ifft2(psi_k * phase_shift, norm='ortho')
-        psi_x = np.fft.fftshift(psi_x)
+        phase_shift = np.exp(2 * np.pi * 1.j * kr).astype(np.complex64)
+        psi_x = pyfftw.interfaces.numpy_fft.ifft2(psi_k * phase_shift)
+        psi_x = pyfftw.interfaces.numpy_fft.fftshift(psi_x)
+        # TODO: figure out how to make fft library choice optional
+        # psi_x = np.fft.ifft2(psi_k * phase_shift, norm='ortho')
+        # psi_x = np.fft.fftshift(psi_x)
         psi_x /= np.sqrt(np.sum(np.abs(psi_x) ** 2))
-        return psi_x, psi_k, aperture
+        return psi_x.astype(np.complex64), psi_k.astype(np.complex64), aperture
+
+    def build_propagator(self):
+        k_y, k_x = np.mgrid[-self.kmax / 2: self.kmax / 2: 1.j * self.sampling[0],
+                   -self.kmax / 2: self.kmax / 2: 1.j * self.sampling[1]]
+        k_rad_sq = k_x ** 2 + k_y ** 2
+        propag = np.exp(-np.pi * 1.j * self.Lambda * self.slice_t * k_rad_sq)
+        return propag
 
 
+    @staticmethod
+    def bandwidth_limit_mask(arr_shape, radius=0.5):
+        # assumes square image
+        grid_x, grid_y = np.mgrid[-arr_shape[0] // 2:arr_shape[0] // 2, -arr_shape[0] // 2:arr_shape[0] // 2]
+        r_grid = np.sqrt(grid_x ** 2 + grid_y ** 2)
+        bl_mask = np.heaviside(arr_shape[0] * radius - r_grid, 0)
+        return bl_mask
 
+    def multi_slice(self):
+        # check
+        try:
+            self.potential_slices.shape
+        except _ as err:
+            warn('Potential slices must calculated first before calling multi_slice')
+            raise err
+
+        # Put the potential slices in shared memory so all workers access it
+        shared_slices = mp.Array(ctypes.c_float, self.potential_slices.size, lock=False)
+        temp = np.frombuffer(shared_slices, dtype=np.float32)
+        for (i, pot) in enumerate(self.potential_slices):
+            temp[i * pot.size:(i + 1) * pot.size] = pot.flatten().astype(np.float32)
+
+        tasks = [((self, pos), {'method': 'propagate_beams'}) for pos in range(probe_positions)]
+        processes = min(mp.cpu_count(), num_slices)
+        chunk = np.int(np.floor(num_slices / processes))
+        with mp.Pool(processes=processes, maxtasksperchild=1) as pool:
+            jobs = pool.imap(unwrap, tasks, chunksize=chunk)
+            potential_slices = np.array([j for j in jobs])
+
+
+    def propagate_beam(self, args):
+        Lambda, q_max, q_semi, num_pix, chi_args, probe_pos, int_param, slice_thickness, atom_pot.shape, bandwidth = args
+        propag = make_propagator(Lambda, slice_thickness, q_max, num_pix).astype(np.complex64)
+        blim_mask = bandwidth_limit_mask(propag.shape, radius=1 / 3).astype(np.float32)
+        probe, _, _ = cal_probe(Lambda, q_max, q_semi, num_pix, chi_args, pos=probe_pos, smooth_ap=True)
+        probes = []
+        probe_last = probe.astype(np.complex64)
+        slices = np.frombuffer(shared_slices, dtype=np.float32)
+        slices = slices.reshape(atom_pot.shape)
+        slices = np.exp(1.j * int_param * slices).astype(np.complex64)
+        pyfftw.interfaces.cache.enable()
+        for (i, trans) in enumerate(slices[::-1]):
+            t_psi = pyfftw.interfaces.numpy_fft.fft2(trans * probe_last, overwrite_input=True) * blim_mask
+            probe_next = pyfftw.interfaces.numpy_fft.ifft2(propag * t_psi, overwrite_input=True)
+            #         probes.append(probe_next)
+            probe_last = probe_next
+        #         if verbose and not bool(i%25):
+        #             print('calculating slice %d/%d:'%(i,slices.shape[0]))
+        #             print('integrated scattered intensity: %2.4f' %np.sum(np.abs(probe_next)**2))
+
+        cbed = np.abs(np.fft.fft2(probe_next)) ** 2
+        #     probes = np.array(probes)
+        print('finished with probe position: %s' % format(probe_pos))
+        return cbed
 
