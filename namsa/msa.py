@@ -95,7 +95,6 @@ class MSA(object):
             potential_slices = np.array([j for j in jobs])
         self.potential_slices = potential_slices.astype(np.float32)
 
-
     def make_slice(self, args):
         slice_num = args
         mask = np.logical_and(self.supercell_xyz[:, -1] >= slice_num * self.slice_t,
@@ -131,11 +130,10 @@ class MSA(object):
         v = sum_v.sum(-1)
         potential = bin_2d_array(v, dwnspl=oversample, mode='mean')
         potential -= potential.min()
-        return potential
-
+        return potential.astype(np.float32)
 
     def build_probe(self, probe_position=np.array([0.,0.]), smooth_apert=True, apert_smooth=50, spherical_phase=True,
-                    aberration_args={'C1':0., 'C3': 0., 'C5': 0.}, scherzer=True):
+                    aberration_dict={'C1':0., 'C3': 0., 'C5': 0.}, scherzer=True):
 
         k_y, k_x = np.mgrid[-self.kmax/2: self.kmax/2: 1.j*self.sampling[0],
                             -self.kmax/2: self.kmax/2: 1.j * self.sampling[1]]
@@ -177,7 +175,6 @@ class MSA(object):
         propag = np.exp(-np.pi * 1.j * self.Lambda * self.slice_t * k_rad_sq)
         return propag
 
-
     @staticmethod
     def bandwidth_limit_mask(arr_shape, radius=0.5):
         # assumes square image
@@ -186,27 +183,26 @@ class MSA(object):
         bl_mask = np.heaviside(arr_shape[0] * radius - r_grid, 0)
         return bl_mask
 
-    def multi_slice(self):
+    def generate_probe_positions(self, probe_step=np.array([0.1, 0.1]), probe_range=[(0., 1.0), (0., 1.0)]):
+        grid_steps = np.floor(np.array()
+    def multi_slice(self, probe_pos=np.array([0.,0.]),probe_grid=True):
         # check
-        try:
-            self.potential_slices.shape
-        except _ as err:
+        if isinstance(self.potentials_slices, np.ndarray) is False:
             warn('Potential slices must calculated first before calling multi_slice')
-            raise err
-
+            return
+        
         # Put the potential slices in shared memory so all workers access it
         shared_slices = mp.Array(ctypes.c_float, self.potential_slices.size, lock=False)
         temp = np.frombuffer(shared_slices, dtype=np.float32)
         for (i, pot) in enumerate(self.potential_slices):
             temp[i * pot.size:(i + 1) * pot.size] = pot.flatten().astype(np.float32)
 
-        tasks = [((self, pos), {'method': 'propagate_beams'}) for pos in range(probe_positions)]
-        processes = min(mp.cpu_count(), num_slices)
-        chunk = np.int(np.floor(num_slices / processes))
-        with mp.Pool(processes=processes, maxtasksperchild=1) as pool:
+        tasks = [((self, pos), {'method': 'propagate_beams'}) for pos in range(self.probe_positions)]
+        processes = min(mp.cpu_count(), self.probe_positions.shape[0])
+        chunk = np.int(np.floor(self.probe_positions.shape[0] / processes))
+        with mp.Pool(processes=processes, maxtasksperchild=1, initargs=(shared_slices,)) as pool:
             jobs = pool.imap(unwrap, tasks, chunksize=chunk)
             potential_slices = np.array([j for j in jobs])
-
 
     def propagate_beam(self, args):
         Lambda, q_max, q_semi, num_pix, chi_args, probe_pos, int_param, slice_thickness, atom_pot.shape, bandwidth = args
