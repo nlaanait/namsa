@@ -1,5 +1,5 @@
 from .database import kirkland_params
-from .optics import voltage2Lambda, sigma_int
+from .optics import voltage2Lambda, sigma_int, spherical_phase_error
 from .utils import *
 import numpy as np
 from scipy.special import k0
@@ -132,7 +132,35 @@ class MSA(object):
         potential -= potential.min()
         return potential.astype(np.float32)
 
+    def build_probe(self, probe_position=np.array([0.,0.]), smooth_apert=True, apert_smooth=50, spherical_phase=True,
+                    aberration_args={'C1':0., 'C3': 0., 'C5': 0.}, scherzer=True):
 
+        k_y, k_x = np.mgrid[-self.kmax/2: self.kmax/2: 1.j*self.sampling[0],
+                            -self.kmax/2: self.kmax/2: 1.j * self.sampling[1]]
+        k_rad = np.sqrt(k_x ** 2 + k_y ** 2)
+        k_semi = self.semi_ang/self.Lambda
+
+        # aperture function
+        aperture = np.heaviside(k_semi - k_rad, 0.5)
+        if smooth_apert:
+            aperture = 1 / (1 + np.exp(-2 * apert_smooth * (k_semi - k_rad)))
+
+        # aberration
+        if spherical_phase:
+            phase_error = spherical_phase_error(k_rad, self.Lambda, scherzer, **aberration_args)
+        else:
+            pass
+            #TODO: implement non-rotationally invariant phase error
+
+        # probe wavefunction
+        psi_k = aperture * phase_error
+        y, x = probe_position
+        kr = k_x * x + k_y * y
+        phase_shift = np.exp(2 * np.pi * 1.j * kr)
+        psi_x = np.fft.ifft2(psi_k * phase_shift, norm='ortho')
+        psi_x = np.fft.fftshift(psi_x)
+        psi_x /= np.sqrt(np.sum(np.abs(psi_x) ** 2))
+        return psi_x, psi_k, aperture
 
 
 
