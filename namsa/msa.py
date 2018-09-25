@@ -19,8 +19,8 @@ def unwrap(args):
     method_name = kwargs.pop('method')
     if method_name == 'build_slices':
         return MSA.make_slice(msa, params)
-    elif method_name == 'propagate_probes':
-        return MSA.propagate_probes(msa, params, kwargs)
+    elif method_name == 'propagate_beams':
+        return MSA.propagate_beam(msa, params)
 
 
 class MSA(object):
@@ -90,10 +90,12 @@ class MSA(object):
         tasks = [((self, slice_num), {'method':'build_slices'}) for slice_num in range(num_slices)]
         processes = min(mp.cpu_count(), num_slices)
         chunk = np.int(np.floor(num_slices / processes))
-        with mp.Pool(processes=processes, maxtasksperchild=1) as pool:
-            jobs = pool.imap(unwrap, tasks, chunksize=chunk)
-            potential_slices = np.array([j for j in jobs])
+        pool = mp.Pool(processes=processes, maxtasksperchild=1)
+        jobs = pool.imap(unwrap, tasks, chunksize=chunk)
+        potential_slices = np.array([j for j in jobs])
+        pool.close()
         self.potential_slices = potential_slices.astype(np.float32)
+        print('Built potential slices with shape:%s' % format(self.potential_slices.shape))
 
     def make_slice(self, args):
         slice_num = args
@@ -132,23 +134,26 @@ class MSA(object):
         potential -= potential.min()
         return potential.astype(np.float32)
 
-    def build_probe(self, probe_position=np.array([0.,0.]), smooth_apert=True, apert_smooth=50, spherical_phase=True,
-                    aberration_dict={'C1':0., 'C3': 0., 'C5': 0.}, scherzer=True):
-
-        k_y, k_x = np.mgrid[-self.kmax/2: self.kmax/2: 1.j*self.sampling[0],
-                            -self.kmax/2: self.kmax/2: 1.j * self.sampling[1]]
+    def build_probe(self, probe_position=np.array([0., 0.]), probe_dict={'smooth_apert': True, 'apert_smooth': 50,
+                                                                        'spherical_phase': True, 'aberration_dict':
+                                                                            {'C1': 0., 'C3': 0., 'C5': 0.},
+                                                                        'scherzer': True}):
+        self.probe_dict = probe_dict
+        k_y, k_x = np.mgrid[-self.kmax/2: self.kmax/2: 1j*self.sampling[0],
+                            -self.kmax/2: self.kmax/2: 1j * self.sampling[1]]
         k_rad = np.sqrt(k_x ** 2 + k_y ** 2)
         k_semi = self.semi_ang/self.Lambda
 
         # aperture function
-        if smooth_apert:
-            aperture = 1 / (1 + np.exp(-2 * apert_smooth * (k_semi - k_rad)))
+        if probe_dict['smooth_apert']:
+            aperture = 1 / (1 + np.exp(-2 * probe_dict['apert_smooth'] * (k_semi - k_rad)))
         else:
             aperture = np.heaviside(k_semi - k_rad, 0.5)
 
         # aberration
-        if spherical_phase:
-            phase_error = spherical_phase_error(k_rad, self.Lambda, scherzer, **aberration_dict)
+        if probe_dict['spherical_phase']:
+            phase_error = spherical_phase_error(k_rad, self.Lambda, probe_dict['scherzer'],
+                                                **probe_dict['aberration_dict'])
 
         else:
             pass
@@ -162,70 +167,94 @@ class MSA(object):
         phase_shift = np.exp(2 * np.pi * 1.j * kr).astype(np.complex64)
         psi_x = pyfftw.interfaces.numpy_fft.ifft2(psi_k * phase_shift)
         psi_x = pyfftw.interfaces.numpy_fft.fftshift(psi_x)
-        # TODO: figure out how to make fft library choice optional
+        # TODO: need to make fft library choice optional
         # psi_x = np.fft.ifft2(psi_k * phase_shift, norm='ortho')
         # psi_x = np.fft.fftshift(psi_x)
         psi_x /= np.sqrt(np.sum(np.abs(psi_x) ** 2))
-        return psi_x.astype(np.complex64), psi_k.astype(np.complex64), aperture
+        return psi_x.astype(np.complex64), psi_k.astype(np.complex64), aperture.astype(np.float32)
 
     def build_propagator(self):
-        k_y, k_x = np.mgrid[-self.kmax / 2: self.kmax / 2: 1.j * self.sampling[0],
-                   -self.kmax / 2: self.kmax / 2: 1.j * self.sampling[1]]
+        k_y, k_x = np.mgrid[-self.kmax / 2: self.kmax / 2: 1j * self.sampling[0],
+                   -self.kmax / 2: self.kmax / 2: 1j * self.sampling[1]]
         k_rad_sq = k_x ** 2 + k_y ** 2
         propag = np.exp(-np.pi * 1.j * self.Lambda * self.slice_t * k_rad_sq)
-        return propag
+        return propag.astype(np.complex64)
 
     @staticmethod
     def bandwidth_limit_mask(arr_shape, radius=0.5):
         # assumes square image
-        grid_x, grid_y = np.mgrid[-arr_shape[0] // 2:arr_shape[0] // 2, -arr_shape[0] // 2:arr_shape[0] // 2]
+        grid_x, grid_y = np.mgrid[-arr_shape[0] // 2:arr_shape[0] // 2, -arr_shape[1] // 2:arr_shape[1] // 2]
         r_grid = np.sqrt(grid_x ** 2 + grid_y ** 2)
-        bl_mask = np.heaviside(arr_shape[0] * radius - r_grid, 0)
-        return bl_mask
+        bl_mask = np.heaviside(max(arr_shape[0], arr_shape[1]) * radius - r_grid, 0)
+        return bl_mask.astype(np.float32)
 
-    def generate_probe_positions(self, probe_step=np.array([0.1, 0.1]), probe_range=[(0., 1.0), (0., 1.0)]):
-        grid_steps = np.floor(np.array()
-    def multi_slice(self, probe_pos=np.array([0.,0.]),probe_grid=True):
-        # check
-        if isinstance(self.potentials_slices, np.ndarray) is False:
-            warn('Potential slices must calculated first before calling multi_slice')
+    def generate_probe_positions(self, probe_step=np.array([0.1, 0.1]), probe_range=np.array([[0., 1.0], [0., 1.0]])):
+        grid_steps_x, grid_steps_y = np.floor(np.diff(probe_range).flatten() * self.dims[:2] / probe_step).astype(np.int)
+        grid_range_x, grid_range_y = [(probe_range[i] - np.ones((2,)) * 0.5) * self.dims[i]
+                                      for i in range(2)]
+        y_pos, x_pos = np.mgrid[grid_range_y[0]: grid_range_y[1]: -1j * grid_steps_y,
+                       grid_range_x[0]: grid_range_x[1]: -1j * grid_steps_x]
+        probe_pos = np.array([[y, -x] for y, x in zip(y_pos.flatten()[::-1], x_pos.flatten())])
+        self.probe_positions = probe_pos
+
+    def multi_slice(self, probe_pos=np.array([0.,0.]), probe_grid=True, return_probes=True, bandwidth=1/3):
+        # check for slices
+        if isinstance(self.potential_slices, np.ndarray) is False:
+            warn('Potential slices must be calculated first before calling multi_slice')
             return
-        
-        # Put the potential slices in shared memory so all workers access it
-        shared_slices = mp.Array(ctypes.c_float, self.potential_slices.size, lock=False)
-        temp = np.frombuffer(shared_slices, dtype=np.float32)
-        for (i, pot) in enumerate(self.potential_slices):
-            temp[i * pot.size:(i + 1) * pot.size] = pot.flatten().astype(np.float32)
+        # check for probe
+        if isinstance(self.probe_dict, dict) is False:
+            warn('Probe wave function must be initialized first before calling multi_slice')
+            return
+        if probe_grid:
+            # Put the potential slices in shared memory so all workers access it
+            global shared_slices
+            shared_slices = mp.Array(ctypes.c_float, self.potential_slices.size, lock=False)
+            temp = np.frombuffer(shared_slices, dtype=np.float32)
+            for (i, pot) in enumerate(self.potential_slices):
+                temp[i * pot.size:(i + 1) * pot.size] = pot.flatten().astype(np.float32)
 
-        tasks = [((self, pos), {'method': 'propagate_beams'}) for pos in range(self.probe_positions)]
-        processes = min(mp.cpu_count(), self.probe_positions.shape[0])
-        chunk = np.int(np.floor(self.probe_positions.shape[0] / processes))
-        with mp.Pool(processes=processes, maxtasksperchild=1, initargs=(shared_slices,)) as pool:
+            tasks = [((self, (pos, return_probes, probe_grid, bandwidth)), {'method': 'propagate_beams'})
+                     for pos in self.probe_positions]
+            processes = min(mp.cpu_count(), self.probe_positions.shape[0])
+            chunk = np.floor(self.probe_positions.shape[0] / processes).astype(np.int)
+            pool = mp.Pool(processes=processes, initargs=(shared_slices,))
             jobs = pool.imap(unwrap, tasks, chunksize=chunk)
-            potential_slices = np.array([j for j in jobs])
+            trans_probes = np.array([j for j in jobs])
+            pool.close()
+            return trans_probes
+        else:
+            trans_probes = self.propagate_beam([probe_pos, return_probes, probe_grid, bandwidth])
+            return trans_probes
 
     def propagate_beam(self, args):
-        Lambda, q_max, q_semi, num_pix, chi_args, probe_pos, int_param, slice_thickness, atom_pot.shape, bandwidth = args
-        propag = make_propagator(Lambda, slice_thickness, q_max, num_pix).astype(np.complex64)
-        blim_mask = bandwidth_limit_mask(propag.shape, radius=1 / 3).astype(np.float32)
-        probe, _, _ = cal_probe(Lambda, q_max, q_semi, num_pix, chi_args, pos=probe_pos, smooth_ap=True)
+        probe_pos, return_probes, probe_grid, bandwidth = args
+        propag = self.build_propagator()
+        blim_mask = self.bandwidth_limit_mask(propag.shape, radius=bandwidth)
+        probe, _, _ = self.build_probe(probe_pos, self.probe_dict)
         probes = []
-        probe_last = probe.astype(np.complex64)
-        slices = np.frombuffer(shared_slices, dtype=np.float32)
-        slices = slices.reshape(atom_pot.shape)
-        slices = np.exp(1.j * int_param * slices).astype(np.complex64)
+        probe_last = probe
+        if probe_grid:
+            slices = np.frombuffer(shared_slices, dtype=np.float32)
+            slices = slices.reshape(self.potential_slices.shape)
+        else:
+            slices = self.potential_slices
+        slices = np.exp(1.j * self.sigma * slices).astype(np.complex64)
         pyfftw.interfaces.cache.enable()
         for (i, trans) in enumerate(slices[::-1]):
             t_psi = pyfftw.interfaces.numpy_fft.fft2(trans * probe_last, overwrite_input=True) * blim_mask
             probe_next = pyfftw.interfaces.numpy_fft.ifft2(propag * t_psi, overwrite_input=True)
-            #         probes.append(probe_next)
+            if return_probes:
+                probes.append(probe_next)
             probe_last = probe_next
         #         if verbose and not bool(i%25):
         #             print('calculating slice %d/%d:'%(i,slices.shape[0]))
         #             print('integrated scattered intensity: %2.4f' %np.sum(np.abs(probe_next)**2))
 
-        cbed = np.abs(np.fft.fft2(probe_next)) ** 2
-        #     probes = np.array(probes)
-        print('finished with probe position: %s' % format(probe_pos))
-        return cbed
+        if return_probes:
+            probes = np.array(probes)
+            print('finished with probe position: %s' % format(probe_pos))
+            return probes
+        else:
+            return probe_next
 

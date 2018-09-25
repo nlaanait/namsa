@@ -91,6 +91,7 @@ def spherical_phase_error(k_rad, Lambda, scherzer, **kwargs):
             C1, _ = scherzer_params(Lambda, C3)
         else:
             print('Spherical Aberration is too small!! Not using Scherzer condition.')
+
     chi = 2 * np.pi / Lambda * (-1/2 * C1 * (k_rad * Lambda) ** 2 + 1/4 * C3 * (k_rad * Lambda) ** 4 + 1/6 * C5 *
                                 (k_rad * Lambda) ** 6)
     return np.exp(-1.j * chi)
