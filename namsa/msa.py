@@ -24,11 +24,14 @@ def unwrap(args):
 
 
 class MSA(object):
-    def __init__(self, energy, semi_angle, supercell, sampling=np.array([512, 512]), max_angle=None):
+    def __init__(self, energy, semi_angle, supercell, sampling=np.array([512, 512]), max_angle=None, verbose=False,
+                 debug=False, output_dir=''):
         self.E = energy
         self.Lambda = voltage2Lambda(self.E*1e3)
         self.semi_ang = semi_angle
-
+        self.verbose = verbose
+        self.debug = debug
+        self.output_dir = output_dir
         # Load and set supercell properties
         if isinstance(supercell, np.ndarray):
             try:
@@ -68,10 +71,18 @@ class MSA(object):
         self.pix_size = self.dims[:2] / self.sampling
         self.kpix_size = self.kmax/self.sampling
         self.sigma = sigma_int(self.E*1e3)
-        print('Simulation Parameters:\nSupercell dimensions xyz:%s (Å)\nReal, Reciprocal space pixel sizes:%s Å, %s 1/Å'
+        self.print_verbose('Simulation Parameters:\nSupercell dimensions xyz:%s (Å)\nReal, Reciprocal space pixel sizes:%s Å, %s 1/Å'
               '\nMax angle: %2.2f (rad)\nSampling in real and reciprocal space: %s pixels' %
               (format(np.round(self.dims, 2)), format(np.round(self.pix_size, 2)), format(np.round(self.kpix_size, 2)),
                self.max_ang, format(self.sampling)))
+
+    def print_debug(self, *args, **kwargs):
+        if self.debug:
+            print(*args, **kwargs)
+
+    def print_verbose(self, *args, **kwargs):
+        if self.verbose:
+            print(*args, **kwargs)
 
     def calc_atomic_potentials(self, potential_range=8, oversample=2, kirkland=True):
         if kirkland:
@@ -87,7 +98,7 @@ class MSA(object):
     def build_potential_slices(self, slice_thickness):
         self.slice_t = slice_thickness
         num_slices = np.int(np.floor(self.dims[-1] / slice_thickness))
-        tasks = [((self, slice_num), {'method':'build_slices'}) for slice_num in range(num_slices)]
+        tasks = [((self, slice_num), {'method': 'build_slices'}) for slice_num in range(num_slices)]
         processes = min(mp.cpu_count(), num_slices)
         chunk = np.int(np.floor(num_slices / processes))
         pool = mp.Pool(processes=processes, maxtasksperchild=1)
@@ -95,7 +106,8 @@ class MSA(object):
         potential_slices = np.array([j for j in jobs])
         pool.close()
         self.potential_slices = potential_slices.astype(np.float32)
-        print('Built potential slices with shape:%s' % format(self.potential_slices.shape))
+        self.print_verbose('Built %d potential slices with shape:%s pixels' % (self.potential_slices.shape[0],
+                                                                  format(self.potential_slices.shape[1:])))
 
     def make_slice(self, args):
         slice_num = args
@@ -197,7 +209,7 @@ class MSA(object):
         probe_pos = np.array([[y, -x] for y, x in zip(y_pos.flatten()[::-1], x_pos.flatten())])
         self.probe_positions = probe_pos
 
-    def multi_slice(self, probe_pos=np.array([0.,0.]), probe_grid=True, return_probes=True, bandwidth=1/3):
+    def cbed(self, probe_pos=np.array([0., 0.]), probe_grid=True, save_probes=True, bandwidth=1 / 3, chunk=4):
         # check for slices
         if isinstance(self.potential_slices, np.ndarray) is False:
             warn('Potential slices must be calculated first before calling multi_slice')
@@ -207,28 +219,31 @@ class MSA(object):
             warn('Probe wave function must be initialized first before calling multi_slice')
             return
         if probe_grid:
-            # Put the potential slices in shared memory so all workers access it
+            # Put the potential slices in shared memory so all workers access it (asynchronously)
             global shared_slices
             shared_slices = mp.Array(ctypes.c_float, self.potential_slices.size, lock=False)
             temp = np.frombuffer(shared_slices, dtype=np.float32)
             for (i, pot) in enumerate(self.potential_slices):
                 temp[i * pot.size:(i + 1) * pot.size] = pot.flatten().astype(np.float32)
 
-            tasks = [((self, (pos, return_probes, probe_grid, bandwidth)), {'method': 'propagate_beams'})
-                     for pos in self.probe_positions]
-            processes = min(mp.cpu_count(), self.probe_positions.shape[0])
-            chunk = np.floor(self.probe_positions.shape[0] / processes).astype(np.int)
+            tasks = (((self, (probe_num, pos, save_probes, probe_grid, bandwidth)), {'method': 'propagate_beams'})
+                     for (probe_num, pos) in enumerate(self.probe_positions))
+            processes = min(mp.cpu_count(), self.probe_positions.shape[0])//4
             pool = mp.Pool(processes=processes, initargs=(shared_slices,))
-            jobs = pool.imap(unwrap, tasks, chunksize=chunk)
+            jobs = pool.map(unwrap, tasks, chunksize=chunk)
             trans_probes = np.array([j for j in jobs])
             pool.close()
-            return trans_probes
+            pool.join()
         else:
-            trans_probes = self.propagate_beam([probe_pos, return_probes, probe_grid, bandwidth])
-            return trans_probes
+            trans_probes = self.propagate_beam([None, probe_pos, save_probes, probe_grid, bandwidth])
+
+        self.print_verbose('Propagated %d probe wavefunctions' % self.probe_positions.shape[0])
+        self.trans_probes = trans_probes
+        return self.trans_probes
 
     def propagate_beam(self, args):
-        probe_pos, return_probes, probe_grid, bandwidth = args
+        probe_num, probe_pos, save_probes, probe_grid, bandwidth = args
+        self.print_debug('received params.')
         propag = self.build_propagator()
         blim_mask = self.bandwidth_limit_mask(propag.shape, radius=bandwidth)
         probe, _, _ = self.build_probe(probe_pos, self.probe_dict)
@@ -237,24 +252,34 @@ class MSA(object):
         if probe_grid:
             slices = np.frombuffer(shared_slices, dtype=np.float32)
             slices = slices.reshape(self.potential_slices.shape)
+            self.print_debug('fetched data from shared memory.')
         else:
             slices = self.potential_slices
         slices = np.exp(1.j * self.sigma * slices).astype(np.complex64)
-        pyfftw.interfaces.cache.enable()
+
         for (i, trans) in enumerate(slices[::-1]):
-            t_psi = pyfftw.interfaces.numpy_fft.fft2(trans * probe_last, overwrite_input=True) * blim_mask
-            probe_next = pyfftw.interfaces.numpy_fft.ifft2(propag * t_psi, overwrite_input=True)
-            if return_probes:
-                probes.append(probe_next)
-            probe_last = probe_next
-        #         if verbose and not bool(i%25):
-        #             print('calculating slice %d/%d:'%(i,slices.shape[0]))
-        #             print('integrated scattered intensity: %2.4f' %np.sum(np.abs(probe_next)**2))
+            t_psi = pyfftw.byte_align(trans * probe_last)
+            fft_fwd = pyfftw.builders.fft2(t_psi, threads=4, avoid_copy=True)
+            temp = pyfftw.byte_align(fft_fwd() * blim_mask * propag)
+            fft_bwd = pyfftw.builders.ifft2(temp, threads=4, avoid_copy=True)
+            probe_last = fft_bwd()
+            if save_probes:
+                probes.append(probe_last)
+        self.print_debug('finished beam propagation.')
 
-        if return_probes:
-            probes = np.array(probes)
-            print('finished with probe position: %s' % format(probe_pos))
-            return probes
-        else:
-            return probe_next
+        if save_probes:
+            np.save(os.path.join(self.output_dir, 'probes_%d.npy') % probe_num, np.array(probes), allow_pickle=False)
+            del probes
+            self.print_verbose('finished with probe position: %s' % format(probe_pos))
 
+        return probe_last
+
+    def check_simulation(self):
+        prob = np.sum([np.abs(probe)**2 for probe in self.trans_probes], axis=(1, 2))
+        max_val = prob.max()
+        min_val = prob.min()
+        print('Max (Min) Integrated Intensity: %2.2f (%2.2f)' % (max_val, min_val))
+        if max_val > 1.0 or min_val < 0.95:
+            print('Significant deviation of the probability from unity is found.\n'
+                  'Change the sampling and/or slice thickness!')
+        return prob
