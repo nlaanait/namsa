@@ -9,6 +9,9 @@ import sys
 from warnings import warn
 import os
 import pyfftw
+import pycuda
+import skcuda.fft as cufft
+from time import time
 
 
 XYZ_dtype = [('atomic_number', 'i'), ('x', 'f'), ('y', 'f'), ('z', 'f'), ('occ', 'f'), ('DW', 'f')]
@@ -21,17 +24,20 @@ def unwrap(args):
         return MSA.make_slice(msa, params)
     elif method_name == 'propagate_beams':
         return MSA.propagate_beam(msa, params)
+    elif method_name == 'build_probes':
+        return MSA.build_probe(msa, probe_position=params[0], probe_dict=params[1])
 
 
 class MSA(object):
     def __init__(self, energy, semi_angle, supercell, sampling=np.array([512, 512]), max_angle=None, verbose=False,
-                 debug=False, output_dir=''):
+                 debug=False, output_dir='', debye_waller=True):
         self.E = energy
         self.Lambda = voltage2Lambda(self.E*1e3)
         self.semi_ang = semi_angle
         self.verbose = verbose
         self.debug = debug
         self.output_dir = output_dir
+        self.debye_waller = debye_waller
         # Load and set supercell properties
         if isinstance(supercell, np.ndarray):
             try:
@@ -58,6 +64,14 @@ class MSA(object):
         self.supercell_dw = supercell_arr['DW']
         self.supercell_occ = supercell_arr['occ']
 
+        # Adding random displacements due to thermal effects
+        unique_Z = np.unique(self.supercell_Z)
+        for Z in unique_Z:
+            indx = np.where(self.supercell_Z == Z)[0]
+            dw = self.supercell_dw[indx][0]
+            displacements = float(self.debye_waller) * dw * np.random.standard_normal(size=self.supercell_xyz[indx].shape)
+            self.supercell_xyz[indx] += displacements
+
         # Set simulation parameters
         self.dims = self.supercell_xyz.max(0) - self.supercell_xyz.min(0)
         if max_angle is None:
@@ -72,9 +86,9 @@ class MSA(object):
         self.kpix_size = self.kmax/self.sampling
         self.sigma = sigma_int(self.E*1e3)
         self.print_verbose('Simulation Parameters:\nSupercell dimensions xyz:%s (Å)\nReal, Reciprocal space pixel sizes:%s Å, %s 1/Å'
-              '\nMax angle: %2.2f (rad)\nSampling in real and reciprocal space: %s pixels' %
+              '\nMax angle: %2.2f (rad)\nSampling in real and reciprocal space: %s pixels,\nThermal Effects: %s' %
               (format(np.round(self.dims, 2)), format(np.round(self.pix_size, 2)), format(np.round(self.kpix_size, 2)),
-               self.max_ang, format(self.sampling)))
+               self.max_ang, format(self.sampling), format(self.debye_waller)))
 
     def print_debug(self, *args, **kwargs):
         if self.debug:
@@ -209,7 +223,7 @@ class MSA(object):
         probe_pos = np.array([[y, -x] for y, x in zip(y_pos.flatten()[::-1], x_pos.flatten())])
         self.probe_positions = probe_pos
 
-    def cbed(self, probe_pos=np.array([0., 0.]), probe_grid=True, save_probes=True, bandwidth=1 / 3, chunk=4):
+    def multislice(self, probe_pos=np.array([0., 0.]), probe_grid=True, save_probes=True, bandwidth=1 / 3):
         # check for slices
         if isinstance(self.potential_slices, np.ndarray) is False:
             warn('Potential slices must be calculated first before calling multi_slice')
@@ -219,6 +233,12 @@ class MSA(object):
             warn('Probe wave function must be initialized first before calling multi_slice')
             return
         if probe_grid:
+            # Define heuristics for python multiprocessing and FFTW multi-threading
+            self.fftw_threads = int(self.sampling.max() // 512)
+            processes = min(mp.cpu_count(), self.probe_positions.shape[0]) // self.fftw_threads
+            chunk = int(np.floor(self.probe_positions.shape[0] / processes))
+
+
             # Put the potential slices in shared memory so all workers access it (asynchronously)
             global shared_slices
             shared_slices = mp.Array(ctypes.c_float, self.potential_slices.size, lock=False)
@@ -228,7 +248,6 @@ class MSA(object):
 
             tasks = (((self, (probe_num, pos, save_probes, probe_grid, bandwidth)), {'method': 'propagate_beams'})
                      for (probe_num, pos) in enumerate(self.probe_positions))
-            processes = min(mp.cpu_count(), self.probe_positions.shape[0])//4
             pool = mp.Pool(processes=processes, initargs=(shared_slices,))
             jobs = pool.map(unwrap, tasks, chunksize=chunk)
             trans_probes = np.array([j for j in jobs])
@@ -237,7 +256,7 @@ class MSA(object):
         else:
             trans_probes = self.propagate_beam([None, probe_pos, save_probes, probe_grid, bandwidth])
 
-        self.print_verbose('Propagated %d probe wavefunctions' % self.probe_positions.shape[0])
+        self.print_verbose('Propagated %d probe wavefunctions' % trans_probes.shape[0])
         self.trans_probes = trans_probes
         return self.trans_probes
 
@@ -259,9 +278,9 @@ class MSA(object):
 
         for (i, trans) in enumerate(slices[::-1]):
             t_psi = pyfftw.byte_align(trans * probe_last)
-            fft_fwd = pyfftw.builders.fft2(t_psi, threads=4, avoid_copy=True)
+            fft_fwd = pyfftw.builders.fft2(t_psi, threads=self.fftw_threads, avoid_copy=True)
             temp = pyfftw.byte_align(fft_fwd() * blim_mask * propag)
-            fft_bwd = pyfftw.builders.ifft2(temp, threads=4, avoid_copy=True)
+            fft_bwd = pyfftw.builders.ifft2(temp, threads=self.fftw_threads, avoid_copy=True)
             probe_last = fft_bwd()
             if save_probes:
                 probes.append(probe_last)
@@ -283,3 +302,80 @@ class MSA(object):
             print('Significant deviation of the probability from unity is found.\n'
                   'Change the sampling and/or slice thickness!')
         return prob
+
+
+class MSAGPU(MSA):
+    def setup_device(self, dev_num=0):
+        # TODO: setup device or devices...
+        pycuda.driver.init()
+        pass
+
+    def plan_simulation(self, num_probes=64):
+        self.num_probes = num_probes
+        free_mem, tot_mem = pycuda.driver.mem_get_info()
+        self.free_mem = free_mem/1024e6  # in GB
+        mem_alloc = num_probes*self.sampling*8/1024e6 + self.potential_slices.nbytes/1024e6
+        while mem_alloc > 0.95 * self.free_mem:
+            num_probes = num_probes // 2
+            mem_alloc = num_probes * self.sampling * 8 / 1024e6 + self.potential_slices.nbytes / 1024e6
+        self.batch = num_probes
+        self.print_verbose('Simulation will propagate %d probes simultaneously' % self.num_probes)
+
+    def multislice(self, save_probes=True, bandwidth=1/3):
+        # not supporting a single probe!!
+        # check for slices
+        if isinstance(self.potential_slices, np.ndarray) is False:
+            warn('Potential slices must be calculated first before calling multi_slice')
+            return
+        # check for probe
+        if isinstance(self.probe_dict, dict) is False:
+            warn('Probe wave function must be initialized first before calling multi_slice')
+            return
+        # check for probe positions
+        if isinstance(self.probe_positions, np.ndarray) is False:
+            warn('probe positions must be initialized first before calling multi_slice')
+            return
+        # Initialize needed data
+        slices = np.exp(1.j * self.sigma * self.potential_slices).astype(np.complex64)
+        propag = self.build_propagator()
+        mask = self.bandwidth_limit_mask(propag.shape, radius=bandwidth)
+        probes = self.build_probes_cpu()
+
+        # Copy over to device
+        trans_gpu = pycuda.gpuarray.to_gpu_async(slices)
+        mask_gpu = pycuda.gpuarray.to_gpu_async(mask)
+        propag_gpu = pycuda.gpuarray.to_gpu_async(propag)
+        probes_gpu = pycuda.gpuarray.to_gpu_async(probes)
+
+        # Setup fft plans
+        # TODO: tile multiple fft plans
+        t = time()
+        plan = cufft.Plan(propag.shape, np.complex64, np.complex64, batch=self.batch)
+        for slice_num in range(trans_gpu.shape[0]):
+            for z_slice in range(probes_gpu.shape[0]):
+                probes_gpu[z_slice] *= trans_gpu[slice_num]
+            cufft.fft(probes_gpu, probes_gpu, plan, True)
+            for z_slice in range(probes_gpu.shape[0]):
+                probes_gpu[z_slice] *= mask_gpu * propag_gpu
+            cufft.ifft(probes_gpu, probes_gpu, plan, False)
+        cufft.fft(probes_gpu, probes_gpu, plan, True)  #return probe wavefunctions in reciprocal space
+        sim_t = time() - t
+        self.print_verbose('Propagated %d probes in %2.4f s' % (self.batch, sim_t))
+        self.trans_probes = probes_gpu.get()
+        return self.trans_probes
+
+    def build_probes_cpu(self):
+        processes = min(mp.cpu_count(), self.probe_positions.shape[0]) // 4
+        chunk = int(np.floor(self.probe_positions.shape[0] / processes))
+        tasks = (((self, (pos, self.probe_dict)), {'method': 'build_probes'})
+                 for pos in self.probe_positions)
+        pool = mp.Pool(processes=processes)
+        jobs = pool.map(unwrap, tasks, chunksize=chunk)
+        probes = np.array([j for j in jobs])
+        pool.close()
+        pool.join()
+        return probes
+
+
+
+
