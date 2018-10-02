@@ -1,6 +1,7 @@
 import json
 import os
 from .optics import *
+import matplotlib.pyplot as plt
 
 
 def make_label_sim_json(structure, space_group, unit_cell, supercell_size, output_name, direc, num_uc=2,
@@ -105,3 +106,27 @@ def bin_2d_array(arr, dwnspl=2, mode='mean'):
     else:
         arr = arr.sum(-1).sum(-2)
     return arr
+
+
+def imageTile(data, padsize=1, padval=0, figsize=(12, 12), **kwargs):
+    '''
+    Function to tile n-images into a single image
+    Input:
+    data: np.ndarray. Must be of dimension 3.
+    padsize: size in pixels of borders between different images. Default is 1.
+    padval: value by which to pad. Default is 0.
+    figsize: size of the figure passed to matplotlib.pyplot.figure. Default is (12,12).
+    **kwargs: extra arguments to be passed to pyplot.imshow() function.
+    '''
+
+    # force the number of images to be square
+    n = int(np.ceil(np.sqrt(data.shape[0])))
+    padding = ((0, n ** 2 - data.shape[0]), (0, padsize), (0, padsize)) + ((0, 0),) * (data.ndim - 3)
+    data = np.pad(data, padding, mode='constant', constant_values=(padval, padval))
+
+    # tile all the images into a single image
+    data = data.reshape((n, n) + data.shape[1:]).transpose((0, 2, 1, 3) + tuple(range(4, data.ndim + 1)))
+    data = data.reshape((n * data.shape[1], n * data.shape[3]) + data.shape[4:])
+    fig, ax = plt.subplots(1, 1, figsize=figsize)
+    ax.imshow(data, **kwargs)
+    ax.axis('off')

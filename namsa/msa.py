@@ -307,14 +307,17 @@ class MSA(object):
 class MSAGPU(MSA):
     def setup_device(self, dev_num=0):
         # TODO: setup device or devices...
-        pycuda.driver.init()
-        pass
+        pycuda.tools.make_default_context()
+        # result = pycuda.cuInit(dev_num)
+        # if result != 0:
+        #     print("cuInit failed ")
+        #     return
 
     def plan_simulation(self, num_probes=64):
         self.num_probes = num_probes
         free_mem, tot_mem = pycuda.driver.mem_get_info()
         self.free_mem = free_mem/1024e6  # in GB
-        mem_alloc = num_probes*self.sampling*8/1024e6 + self.potential_slices.nbytes/1024e6
+        mem_alloc = num_probes * np.prod(self.sampling) * 8 / 1024e6 + self.potential_slices.nbytes / 1024e6
         while mem_alloc > 0.95 * self.free_mem:
             num_probes = num_probes // 2
             mem_alloc = num_probes * self.sampling * 8 / 1024e6 + self.potential_slices.nbytes / 1024e6
@@ -339,13 +342,15 @@ class MSAGPU(MSA):
         slices = np.exp(1.j * self.sigma * self.potential_slices).astype(np.complex64)
         propag = self.build_propagator()
         mask = self.bandwidth_limit_mask(propag.shape, radius=bandwidth)
-        probes = self.build_probes_cpu()
+        t = time()
+        self.probes = self.build_probes_cpu()
+        sim_t = time() - t
+        self.print_verbose('Spent %2.4f s building %d probes on cpu' % (sim_t, self.batch))
 
         # Copy over to device
         trans_gpu = pycuda.gpuarray.to_gpu_async(slices)
-        mask_gpu = pycuda.gpuarray.to_gpu_async(mask)
-        propag_gpu = pycuda.gpuarray.to_gpu_async(propag)
-        probes_gpu = pycuda.gpuarray.to_gpu_async(probes)
+        mask_propag_gpu = pycuda.gpuarray.to_gpu_async(mask * propag)
+        probes_gpu = pycuda.gpuarray.to_gpu_async(self.probes)
 
         # Setup fft plans
         # TODO: tile multiple fft plans
@@ -356,13 +361,17 @@ class MSAGPU(MSA):
                 probes_gpu[z_slice] *= trans_gpu[slice_num]
             cufft.fft(probes_gpu, probes_gpu, plan, True)
             for z_slice in range(probes_gpu.shape[0]):
-                probes_gpu[z_slice] *= mask_gpu * propag_gpu
+                probes_gpu[z_slice] *= mask_propag_gpu
             cufft.ifft(probes_gpu, probes_gpu, plan, False)
         cufft.fft(probes_gpu, probes_gpu, plan, True)  #return probe wavefunctions in reciprocal space
         sim_t = time() - t
         self.print_verbose('Propagated %d probes in %2.4f s' % (self.batch, sim_t))
-        self.trans_probes = probes_gpu.get()
-        return self.trans_probes
+        self.probes = probes_gpu.get()
+
+        # free up device memory
+        del trans_gpu, mask_propag_gpu, probes_gpu
+        
+        return self.probes
 
     def build_probes_cpu(self):
         processes = min(mp.cpu_count(), self.probe_positions.shape[0]) // 4
@@ -371,7 +380,7 @@ class MSAGPU(MSA):
                  for pos in self.probe_positions)
         pool = mp.Pool(processes=processes)
         jobs = pool.map(unwrap, tasks, chunksize=chunk)
-        probes = np.array([j for j in jobs])
+        probes = np.array([j[0] for j in jobs])
         pool.close()
         pool.join()
         return probes
