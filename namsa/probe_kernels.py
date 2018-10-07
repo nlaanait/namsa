@@ -8,8 +8,6 @@ import numpy as np
 cuda_kerns = Template("""
     // WITH
     #include <pycuda-complex.hpp>
-    #include <stdio.h>
-
     __device__ double calc_krad(float k_max, int size_x, int size_y, int col_idx, int row_idx){
         double kx = double(col_idx) * double(k_max)/double(size_x - 1) - double(k_max)/2. ;
         double ky = double(row_idx) * double(k_max)/double(size_y - 1) - double(k_max)/2. ;
@@ -17,34 +15,31 @@ cuda_kerns = Template("""
         return k_rad;
     }
 
-    __device__ float phase_shift(float k_max, int size_x, int size_y, int size_z,
-    int col_idx, int row_idx, int stk_idx, float step, float range, float x_dim, float y_dim){
+  __device__ float phase_shift(float k_max, int size_x, int size_y, int col_idx, int row_idx, int stk_idx,
+          int *grid_step, float *grid_range)
+    {   
         const double pi = acos(-1.0);
-        float kx = float(col_idx) * k_max/float(size_x - 1) - k_max/2.;
-        float ky = float(row_idx) * k_max/float(size_y - 1) - k_max/2.;
-        float x_step = step;
-        float y_step = step;
-        float x_end = range * x_dim ;
-        float y_end = range * y_dim ;
-        if (x_step == 0.0 && y_step == 0.0)
-        {
-            return 0.0;
-        }
-        int ry_idx = rintf(floor(stk_idx * 1.f / sqrtf(size_z)));
-        int rx_idx = stk_idx - ry_idx;
-        float ry = ry_idx * y_step - y_end/2;
-        float rx = rx_idx * sqrtf(size_z)) * x_step - x_end/2;
-        //float ry = stk_idx * y_step - y_end/2;
-        //float rx = stk_idx * x_step - x_end/2;
+        float kx = float(col_idx) * k_max/float(size_x - 1) - k_max/2.; 
+        float ky = float(row_idx) * k_max/float(size_y - 1) - k_max/2.; 
+        int grid_step_x = grid_step[0];
+        int grid_step_y = grid_step[1];
+        int grid_start_x = grid_range[0];
+        int grid_end_x = grid_range[1];
+        int grid_start_y = grid_range[2];
+        int grid_end_y = grid_range[3];
+        float ry_idx = rintf(floorf(stk_idx * 1.f / grid_step_y));
+        float rx_idx = stk_idx - ry_idx * grid_step_x;
+        float ry = ry_idx * (grid_end_y - grid_start_y) / (grid_step_y - 1) + grid_start_y;
+        float rx = rx_idx * (grid_end_x - grid_start_x) / (grid_step_x - 1) + grid_start_x;
         float kr =  - kx * rx - ky * ry;
         return kr;
     }
 
-    __global__ void k_grid(double *arr, double k_max_x, double k_max_y, int size_x, int size_y){
+    __global__ void k_grid(double *arr, double k_max, int size_x, int size_y){
         int row_idx =  blockDim.y * blockIdx.y + threadIdx.y;
         int col_idx =  blockDim.x * blockIdx.x + threadIdx.x;
         int idx = row_idx * size_x  + col_idx;
-        double k_rad = calc_krad(k_max_x, k_max_y, size_x, size_y, col_idx, row_idx);
+        double k_rad = calc_krad(k_max, size_x, size_y, col_idx, row_idx);
         if (idx < size_x * size_y)
         {
             arr[idx] = k_rad;
@@ -108,15 +103,14 @@ cuda_kerns = Template("""
 
     __global__ void build_probes_stack(pycuda::complex<float> psi_pos[][{{y_sampling}}][{{x_sampling}}],
                         pycuda::complex<float> psi_k[{{y_sampling}}][{{x_sampling}}],
-                        int z_size, float k_max, float x_dim, float y_dim, float step, float range){
+                        int z_size, float k_max, int *grid_step, float *grid_range){
         const double pi = acos(-1.0);
         unsigned col_idx = blockIdx.x*blockDim.x + threadIdx.x;
         unsigned row_idx = blockIdx.y*blockDim.y + threadIdx.y;
         unsigned stk_idx = blockIdx.z*blockDim.z + threadIdx.z;
         if (col_idx < {{x_sampling}} && row_idx < {{y_sampling}} && stk_idx < z_size)
         {
-            float kr = phase_shift(k_max, {{x_sampling}}, {{y_sampling}}, z_size,
-            col_idx, row_idx, stk_idx, step, range, x_dim, y_dim);
+            float kr = phase_shift(k_max, {{x_sampling}}, {{y_sampling}}, col_idx, row_idx, stk_idx, grid_step, grid_range);
             psi_pos[stk_idx][row_idx][col_idx]  = pycuda::complex<float>(cosf(2 * pi * kr), sinf(2 * pi * kr));
             psi_pos[stk_idx][row_idx][col_idx] *= psi_k[row_idx][col_idx];
         }
@@ -163,9 +157,9 @@ cuda_kerns = Template("""
         }
     }
 
-    __global__ void fftshift_2d_stack(pycuda::complex<float> arr[][{{y_sampling}} * {{x_sampling}}],
-                                    int z_size, float k_max_x, float k_max_y, float x_dim, float y_dim, float step, float range){
-        // 2D Slice & 1D Line
+    __global__ void fftshift_2d_stack(pycuda::complex<float> arr[][{{y_sampling}} * {{x_sampling}}])
+      {
+      // 2D Slice & 1D Line
         int sLine = {{x_sampling}};
         int sSlice = {{x_sampling}} * {{y_sampling}};
 
@@ -209,6 +203,7 @@ cuda_kerns = Template("""
 
 class ProbeKernels(object):
     def __init__(self, sampling=np.array([512, 512])):
+        self.kernels = dict()
         self.x_sampling= np.int(sampling[1])
         self.y_sampling= np.int(sampling[0])
         kernels = cuda_kerns.render(type= dtype_to_ctype(np.complex64), y_sampling=self.y_sampling, x_sampling=self.x_sampling)

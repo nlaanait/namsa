@@ -1,5 +1,5 @@
 from .database import kirkland_params
-from .optics import voltage2Lambda, sigma_int, spherical_phase_error
+from .optics import *
 from .utils import *
 from .probe_kernels import ProbeKernels
 import numpy as np
@@ -376,7 +376,6 @@ class MSAHybrid(MSA):
         probes_gpu.gpudata.free()
 
         # destroy cufft object
-        # TODO: Check that destroying cufft handle plays nice with callback of method
         cufft.cufft.cufftDestroy(plan.handle)
         return self.probes
 
@@ -397,42 +396,141 @@ class MSAGPU(MSAHybrid):
 
     def load_kernels(self):
         try:
-            self.kernels = ProbeKernels(sampling=self.sampling)
+            probe_kernels = ProbeKernels(sampling=self.sampling)
+            self.kernels = probe_kernels.kernels
             self.print_verbose('CUDA C/C++ Kernels compiled successfully')
-        except _ as E:
+        except cuda.CompileError:
             warn('CUDA C/C++ Kernels did not compile successfully')
-            raise E
+            raise cuda.CompileError
 
-    def build_probes(self, probe_dict={'smooth_apert': True, 'apert_smooth': 50,
+    def build_probe(self, probe_dict={'smooth_apert': True, 'apert_smooth': 50,
                                                                         'spherical_phase': True, 'aberration_dict':
                                                                             {'C1': 0., 'C3': 0., 'C5': 0.},
                                                                         'scherzer': True}):
-        # 1. build a probe in k-space
+        # prepare arguments
+        aber_dict = probe_dict['aberration_dict']
+        k_semi = np.float32(self.semi_ang / self.Lambda)
+        k_max, Lambda, C1, C3, C5 = [np.float32(itm) for itm in [self.kmax, self.Lambda, aber_dict['C1'],
+                                                                 aber_dict['C3'], aber_dict['C5']]]
+        if probe_dict['scherzer']:
+            C1, _ = scherzer_params(self.Lambda, aber_dict['C3'])
+            C1 = np.float32(C1)
+
+
         # define block/grid threads
         shape_x = np.int32(self.sampling[1])
         shape_y = np.int32(self.sampling[0])
         block = (32, 32, 1)
-        grid=(int((shape_x + block[0] - 1)/32), int((shape_y + block[1] - 1)/32),1))
+        grid = (int((shape_x + block[0] - 1)/32), int((shape_y + block[1] - 1)/32), 1)
+
         # allocate memory
-        apert_h = np.empty(self.sampling, dtype=np.float32)
-        apert_d = cuda.mem_alloc(apert_h.nbytes)
-        psi_k_h = np.empty(self.sampling, dtype=np.complex64)
-        psi_k_d = cuda.mem_alloc(psi_k_h.nbytes)
-        # grab appropriate kernel
-        if probe_dict.smooth_apert:
+        self.apert = np.empty(self.sampling, dtype=np.float32)
+        apert_d = cuda.mem_alloc(self.apert.nbytes)
+        self.psi_k = np.empty(self.sampling, dtype=np.complex64)
+        psi_k_d = cuda.mem_alloc(self.psi_k.nbytes)
+
+        # grab appropriate kernels
+        multwise_2d_func = self.kernels['mult_wise_c2d_re2d']
+        fftshift_func = self.kernels['fftshift_2d']
+        if probe_dict['smooth_apert']:
             apert_func = self.kernels['soft_aperture']
         else:
             apert_func = self.kernels['hard_aperture']
-        if probe_dict.spherical_phase:
+        if probe_dict['spherical_phase']:
             phase_func = self.kernels['spherical_phase_error']
         else:
             pass
-            #TODO: implement non-rotationally invariant phase error
+            #TODO: implement non-rotationally invariant phase error kernel
 
-        # build a probe in k-space
-        k_semi = np.float32(self.semi_ang / self.Lambda)
-        k_max, Lambda, C1, C3, C5 = [np.float32(itm) for itm in [self.kmax, self.Lambda, probe_dict['C1'], probe_dict['C3'], probe_dict['C5']]
+        # 1. build a probe in k-space
         apert_func(apert_d, k_max, k_semi, shape_x, shape_y, block=block, grid=grid, shared=0)
         phase_func(psi_k_d, k_max, Lambda, C1, C3, C5, shape_x, shape_y, block=block, grid=grid, shared=0)
-        multwise_cmpx_real(psi_k_d, apert_d, shape_x, shape_y, block=block, grid=grid)
-        
+        multwise_2d_func(psi_k_d, apert_d, shape_x, shape_y, block=block, grid=grid)
+        cuda.memcpy_dtoh_async(self.psi_k, psi_k_d)
+        cuda.memcpy_dtoh_async(self.apert, apert_d)
+
+        # 2. build probe in x-space
+        psi_x = pycuda.gpuarray.GPUArray(self.psi_k.shape, self.psi_k.dtype)
+        psi_k = pycuda.gpuarray.GPUArray(self.psi_k.shape, self.psi_k.dtype, allocator=psi_k_d, gpudata=psi_k_d)
+        fft_plan = cufft.Plan(psi_k.shape, np.complex64, np.complex64, batch=1)
+        cufft.ifft(psi_k, psi_x, fft_plan, False)
+        fftshift_func(psi_x, shape_x, shape_y, block=block, grid=grid)
+        self.psi_x = psi_x.get()
+        self.psi_x /= np.sqrt(np.sum(np.abs(self.psi_x)**2))
+
+        # free gpu mem
+        psi_x.gpudata.free()
+        psi_k_d.free()
+        apert_d.free()
+        cufft.cufft.cufftDestroy(fft_plan.handle)
+
+        return self.psi_x, self.psi_k, self.apert
+
+    def generate_probe_positions(self, probe_step=np.array([0.1, 0.1]), probe_range=np.array([[0., 1.0], [0., 1.0]])):
+        grid_steps_x, grid_steps_y = np.floor(np.diff(probe_range).flatten() * self.dims[:2] / probe_step).astype(np.int)
+        grid_range_x, grid_range_y = [(probe_range[i] - np.ones((2,)) * 0.5) * self.dims[i]
+                                      for i in range(2)]
+        y_pos, x_pos = np.mgrid[grid_range_y[0]: grid_range_y[1]: -1j * grid_steps_y,
+                       grid_range_x[0]: grid_range_x[1]: -1j * grid_steps_x]
+        probe_pos = np.array([[y, -x] for y, x in zip(y_pos.flatten()[::-1], x_pos.flatten())])
+        self.grid_steps = np.array([grid_steps_x, grid_steps_y])
+        self.grid_range = np.array([grid_range_x, grid_range_y]).flatten()
+        self.probe_positions = probe_pos
+
+    def multislice(self):
+        if isinstance(self.probe_positions, np.ndarray) is False:
+            warn('Probe positions must be calculated first before calling multislice')
+            return
+        # prepare arguments
+        grid_range_d = pycuda.gpuarray.to_gpu_async(self.grid_range.astype(np.float32))
+        grid_step_d = pycuda.gpuarray.to_gpu_async(self.grid_steps.astype(np.int32))
+        psi_k_d = pycuda.gpuarray.to_gpu_async(self.psi_k)
+        num_probes = np.int32(self.probe_positions.shape[0])
+
+        # define block/grid threads
+        shape_x = np.int32(self.sampling[1])
+        shape_y = np.int32(self.sampling[0])
+        blk_zsize = 4
+        blk_xsize = 16
+        blk_ysize = 16
+        grid_xsize = int((shape_x + blk_xsize - 1) / blk_xsize)
+        grid_ysize = int((shape_y + blk_ysize - 1) / blk_ysize)
+        grid_zsize = int((num_probes + blk_zsize - 1) / blk_zsize)
+        block = (blk_xsize, blk_ysize, blk_zsize)
+        grid = (grid_xsize, grid_ysize, grid_zsize)
+
+        # allocate memory
+        psi_pos_h = np.empty((num_probes, shape_y, shape_x), dtype=np.complex64)
+        psi_pos_d = cuda.mem_alloc(psi_pos_h.nbytes)
+
+        # grab needed kernels
+        probe_stack_func = self.kernels['probes_stack']
+        fftshift_func = self.kernels['fftshift_2d_stack']
+
+        # build probes
+        probe_stack_func(psi_pos_d, psi_k_d, num_probes, np.float32(self.kmax), grid_step_d, grid_range_d,
+                           block=block, grid=grid)
+        psi_x_pos = pycuda.gpuarray.GPUArray(psi_pos_h.shape, psi_pos_h.dtype)
+        psi_k_pos = pycuda.gpuarray.GPUArray(psi_pos_h.shape, psi_pos_h.dtype, allocator=psi_pos_d, gpudata=psi_pos_d)
+        fft_plan = cufft.Plan(self.psi_k.shape, np.complex64, np.complex64, batch=num_probes)
+        cufft.ifft(psi_k_pos, psi_x_pos, fft_plan, False)
+        fftshift_func(psi_x_pos, shape_x, shape_y, block=block, grid=grid)
+
+        # free gpu mem
+        psi_pos_d.free()
+        grid_range_d.gpudata.free()
+        grid_step_d.gpudata.free()
+        psi_k_d.gpudata.free()
+        cufft.cufft.cufftDestroy(fft_plan.handle)
+
+        self.psi_x_pos = psi_x_pos.get()
+
+
+
+
+
+
+
+
+
+
