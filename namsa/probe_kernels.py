@@ -10,20 +10,18 @@ cuda_kerns = Template("""
     #include <pycuda-complex.hpp>
     #include <stdio.h>
 
-    __device__ double calc_krad(float k_max_x, float k_max_y, int size_x, int size_y, int col_idx, int row_idx){
-        double kx = double(col_idx) * double(k_max_x)/double(size_x - 1) - double(k_max_x)/2. ;
-        double ky = double(row_idx) * double(k_max_y)/double(size_y - 1) - double(k_max_y)/2. ;
+    __device__ double calc_krad(float k_max, int size_x, int size_y, int col_idx, int row_idx){
+        double kx = double(col_idx) * double(k_max)/double(size_x - 1) - double(k_max)/2. ;
+        double ky = double(row_idx) * double(k_max)/double(size_y - 1) - double(k_max)/2. ;
         double k_rad = sqrt(kx * kx + ky * ky);
         return k_rad;
     }
 
-    __device__ float phase_shift(float k_max_x, float k_max_y, int size_x, int size_y, int size_z,
+    __device__ float phase_shift(float k_max, int size_x, int size_y, int size_z,
     int col_idx, int row_idx, int stk_idx, float step, float range, float x_dim, float y_dim){
         const double pi = acos(-1.0);
-        float kx = float(col_idx) * k_max_x/float(size_x - 1) - k_max_x/2.;
-        float ky = float(row_idx) * k_max_y/float(size_y - 1) - k_max_y/2.;
-       // float x_step = range * x_dim / step;
-       // float y_step = range * y_dim / step;
+        float kx = float(col_idx) * k_max/float(size_x - 1) - k_max/2.;
+        float ky = float(row_idx) * k_max/float(size_y - 1) - k_max/2.;
         float x_step = step;
         float y_step = step;
         float x_end = range * x_dim ;
@@ -32,10 +30,10 @@ cuda_kerns = Template("""
         {
             return 0.0;
         }
-       // range -= 0.5;
-        //y_range -= 0.5;
-        float ry = rintf(floor(stk_idx * 1.f / sqrtf(size_z))) * y_step - y_end/2;
-        float rx = (stk_idx - rintf(stk_idx * 1.f / sqrtf(size_z)) * sqrtf(size_z)) * x_step - x_end/2;
+        int ry_idx = rintf(floor(stk_idx * 1.f / sqrtf(size_z)));
+        int rx_idx = stk_idx - ry_idx;
+        float ry = ry_idx * y_step - y_end/2;
+        float rx = rx_idx * sqrtf(size_z)) * x_step - x_end/2;
         //float ry = stk_idx * y_step - y_end/2;
         //float rx = stk_idx * x_step - x_end/2;
         float kr =  - kx * rx - ky * ry;
@@ -64,11 +62,11 @@ cuda_kerns = Template("""
         }
     }
 
-    __global__ void hard_aperture(float *arr, float k_max_x, float k_max_y, float k_semi, int size_x, int size_y){
+    __global__ void hard_aperture(float *arr, float k_max, float k_semi, int size_x, int size_y){
         int row_idx =  blockDim.y * blockIdx.y + threadIdx.y;
         int col_idx =  blockDim.x * blockIdx.x + threadIdx.x;
         int idx = row_idx * size_x  + col_idx;
-        float k_rad = calc_krad(k_max_x, k_max_y, size_x, size_y, col_idx, row_idx);
+        float k_rad = calc_krad(k_max, size_x, size_y, col_idx, row_idx);
         if (row_idx < size_x && col_idx < size_y)
         {
             if ( k_rad  < k_semi ){
@@ -80,24 +78,24 @@ cuda_kerns = Template("""
         }
     }
 
-    __global__ void soft_aperture(float *arr, float k_max_x, float k_max_y, float k_semi, int size_x, int size_y){
+    __global__ void soft_aperture(float *arr, float k_max, float k_semi, int size_x, int size_y){
         int row_idx =  blockDim.y * blockIdx.y + threadIdx.y;
         int col_idx =  blockDim.x * blockIdx.x + threadIdx.x;
         int idx = row_idx * size_x  + col_idx;
-        float k_rad = calc_krad(k_max_x, k_max_y, size_x, size_y, col_idx, row_idx);
+        float k_rad = calc_krad(k_max, size_x, size_y, col_idx, row_idx);
         if (row_idx < size_y && col_idx < size_x)
         {
             arr[idx] = 1.f / (1.f + expf(- 2.f * 80.f * (k_semi - k_rad)));
         }
     }
 
-    __global__ void spherical_phase_error(pycuda::complex<float> *arr, float k_max_x, float k_max_y,
-    float Lambda, float C1, float C3, float C5, int size_x, int size_y) {
+    __global__ void spherical_phase_error(pycuda::complex<float> *arr, float k_max, float Lambda,
+    float C1, float C3, float C5, int size_x, int size_y) {
         const double pi = acos(-1.f);
         int row_idx =  blockDim.y * blockIdx.y + threadIdx.y;
         int col_idx =  blockDim.x * blockIdx.x + threadIdx.x;
         int idx = row_idx * size_x  + col_idx;
-        double k_rad = calc_krad(k_max_x, k_max_y, size_x, size_y, col_idx, row_idx);
+        double k_rad = calc_krad(k_max, size_x, size_y, col_idx, row_idx);
         double chi = 2. * pi / Lambda * (-1.f/2 * C1 * pow(k_rad * Lambda, 2) + 1.f/4 * C3 * pow(k_rad * Lambda, 4)
         + 1.f/6 * C5 * pow(k_rad * Lambda, 6));
         if (row_idx < size_y && col_idx < size_x)
@@ -110,14 +108,14 @@ cuda_kerns = Template("""
 
     __global__ void build_probes_stack(pycuda::complex<float> psi_pos[][{{y_sampling}}][{{x_sampling}}],
                         pycuda::complex<float> psi_k[{{y_sampling}}][{{x_sampling}}],
-                        int z_size, float k_max_x, float k_max_y, float x_dim, float y_dim, float step, float range){
+                        int z_size, float k_max, float x_dim, float y_dim, float step, float range){
         const double pi = acos(-1.0);
         unsigned col_idx = blockIdx.x*blockDim.x + threadIdx.x;
         unsigned row_idx = blockIdx.y*blockDim.y + threadIdx.y;
         unsigned stk_idx = blockIdx.z*blockDim.z + threadIdx.z;
         if (col_idx < {{x_sampling}} && row_idx < {{y_sampling}} && stk_idx < z_size)
         {
-            float kr = phase_shift(k_max_x, k_max_y, {{x_sampling}}, {{y_sampling}}, z_size,
+            float kr = phase_shift(k_max, {{x_sampling}}, {{y_sampling}}, z_size,
             col_idx, row_idx, stk_idx, step, range, x_dim, y_dim);
             psi_pos[stk_idx][row_idx][col_idx]  = pycuda::complex<float>(cosf(2 * pi * kr), sinf(2 * pi * kr));
             psi_pos[stk_idx][row_idx][col_idx] *= psi_k[row_idx][col_idx];
