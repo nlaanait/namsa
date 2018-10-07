@@ -1,6 +1,7 @@
 from .database import kirkland_params
 from .optics import voltage2Lambda, sigma_int, spherical_phase_error
 from .utils import *
+from .probe_kernels import ProbeKernels
 import numpy as np
 from scipy.special import k0
 import multiprocessing as mp
@@ -10,6 +11,7 @@ from warnings import warn
 import os
 import pyfftw
 import pycuda
+import pycuda.driver as cuda
 import skcuda.fft as cufft
 from time import time
 
@@ -304,7 +306,7 @@ class MSA(object):
         return prob
 
 
-class MSAGPU(MSA):
+class MSAHybrid(MSA):
     def setup_device(self, dev_num=0):
         # TODO: setup device or devices...
         pycuda.tools.make_default_context()
@@ -369,8 +371,13 @@ class MSAGPU(MSA):
         self.probes = probes_gpu.get()
 
         # free up device memory
-        del trans_gpu, mask_propag_gpu, probes_gpu
-        
+        trans_gpu.gpudata.free()
+        mask_propag_gpu.gpudata.free()
+        probes_gpu.gpudata.free()
+
+        # destroy cufft object
+        # TODO: Check that destroying cufft handle plays nice with callback of method
+        cufft.cufft.cufftDestroy(plan.handle)
         return self.probes
 
     def build_probes_cpu(self):
@@ -386,5 +393,46 @@ class MSAGPU(MSA):
         return probes
 
 
+class MSAGPU(MSAHybrid):
 
+    def load_kernels(self):
+        try:
+            self.kernels = ProbeKernels(sampling=self.sampling)
+            self.print_verbose('CUDA C/C++ Kernels compiled successfully')
+        except _ as E:
+            warn('CUDA C/C++ Kernels did not compile successfully')
+            raise E
 
+    def build_probes(self, probe_dict={'smooth_apert': True, 'apert_smooth': 50,
+                                                                        'spherical_phase': True, 'aberration_dict':
+                                                                            {'C1': 0., 'C3': 0., 'C5': 0.},
+                                                                        'scherzer': True}):
+        # 1. build a probe in k-space
+        # define block/grid threads
+        shape_x = np.int32(self.sampling[1])
+        shape_y = np.int32(self.sampling[0])
+        block = (32, 32, 1)
+        grid=(int((shape_x + block[0] - 1)/32), int((shape_y + block[1] - 1)/32),1))
+        # allocate memory
+        apert_h = np.empty(self.sampling, dtype=np.float32)
+        apert_d = cuda.mem_alloc(apert_h.nbytes)
+        psi_k_h = np.empty(self.sampling, dtype=np.complex64)
+        psi_k_d = cuda.mem_alloc(psi_k_h.nbytes)
+        # grab appropriate kernel
+        if probe_dict.smooth_apert:
+            apert_func = self.kernels['soft_aperture']
+        else:
+            apert_func = self.kernels['hard_aperture']
+        if probe_dict.spherical_phase:
+            phase_func = self.kernels['spherical_phase_error']
+        else:
+            pass
+            #TODO: implement non-rotationally invariant phase error
+
+        # build a probe in k-space
+        k_semi = np.float32(self.semi_ang / self.Lambda)
+        k_max, Lambda, C1, C3, C5 = [np.float32(itm) for itm in [self.kmax, self.Lambda, probe_dict['C1'], probe_dict['C3'], probe_dict['C5']]
+        apert_func(apert_d, k_max, k_semi, shape_x, shape_y, block=block, grid=grid, shared=0)
+        phase_func(psi_k_d, k_max, Lambda, C1, C3, C5, shape_x, shape_y, block=block, grid=grid, shared=0)
+        multwise_cmpx_real(psi_k_d, apert_d, shape_x, shape_y, block=block, grid=grid)
+        
