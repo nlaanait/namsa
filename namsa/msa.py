@@ -23,11 +23,11 @@ def unwrap(args):
     (msa, params), kwargs = args
     method_name = kwargs.pop('method')
     if method_name == 'build_slices':
-        return MSA.make_slice(msa, params)
+        return msa.make_slice(params)
     elif method_name == 'propagate_beams':
-        return MSA.propagate_beam(msa, params)
+        return msa.propagate_beam(params)
     elif method_name == 'build_probes':
-        return MSA.build_probe(msa, probe_position=params[0], probe_dict=params[1])
+        return msa.build_probe(probe_position=params[0], probe_dict=params[1])
 
 
 class MSA(object):
@@ -121,7 +121,8 @@ class MSA(object):
         jobs = pool.imap(unwrap, tasks, chunksize=chunk)
         potential_slices = np.array([j for j in jobs])
         pool.close()
-        self.potential_slices = potential_slices.astype(np.float32)
+        ##self.potential_slices = potential_slices.astype(np.float32)
+        self.potential_slices = potential_slices
         self.print_verbose('Built %d potential slices with shape:%s pixels' % (self.potential_slices.shape[0],
                                                                   format(self.potential_slices.shape[1:])))
 
@@ -162,10 +163,9 @@ class MSA(object):
         potential -= potential.min()
         return potential.astype(np.float32)
 
-    def build_probe(self, probe_position=np.array([0., 0.]), probe_dict={'smooth_apert': True, 'apert_smooth': 50,
-                                                                        'spherical_phase': True, 'aberration_dict':
-                                                                            {'C1': 0., 'C3': 0., 'C5': 0.},
-                                                                        'scherzer': True}):
+    def build_probe(self, probe_position=np.array([0., 0.]), probe_dict={'smooth_apert': True, 'apert_smooth': 50, 'spherical_phase': True, 'aberration_dict':
+                        {'C1': 0., 'C3': 0., 'C5': 0.},'scherzer': True}
+                    ):
         self.probe_dict = probe_dict
         k_y, k_x = np.mgrid[-self.kmax/2: self.kmax/2: 1j*self.sampling[0],
                             -self.kmax/2: self.kmax/2: 1j * self.sampling[1]]
@@ -320,9 +320,11 @@ class MSAHybrid(MSA):
         free_mem, tot_mem = pycuda.driver.mem_get_info()
         self.free_mem = free_mem/1024e6  # in GB
         mem_alloc = num_probes * np.prod(self.sampling) * 8 / 1024e6 + self.potential_slices.nbytes / 1024e6
+        print('mem_alloc:',mem_alloc)
+        print('free_mem:',self.free_mem)
         while mem_alloc > 0.95 * self.free_mem:
             num_probes = num_probes // 2
-            mem_alloc = num_probes * self.sampling * 8 / 1024e6 + self.potential_slices.nbytes / 1024e6
+            mem_alloc = num_probes * np.prod(self.sampling) * 8 / 1024e6 + self.potential_slices.nbytes / 1024e6
         self.batch = num_probes
         self.print_verbose('Simulation will propagate %d probes simultaneously' % self.num_probes)
 
@@ -394,7 +396,39 @@ class MSAHybrid(MSA):
 
 class MSAGPU(MSAHybrid):
 
-    def load_kernels(self):
+    def build_potential_slices(self, slice_thickness):
+        self.slice_t = slice_thickness
+        self.num_slices = np.int32(np.floor(self.dims[-1] / slice_thickness))
+        tasks = [((self, slice_num), {'method': 'build_slices'}) for slice_num in range(self.num_slices)]
+        processes = min(mp.cpu_count(), self.num_slices)
+        chunk = np.int(np.floor(self.num_slices / processes))
+        pool = mp.Pool(processes=processes)
+        jobs = pool.imap(unwrap, tasks, chunksize=chunk)
+        self.potential_slices = np.array([j for j in jobs])
+        pool.close()
+        self.print_verbose('Built %d potential slices with shape:%s pixels' % (self.potential_slices.shape[0],
+                                                                  format(self.potential_slices.shape[1:])))
+    def make_slice(self, args):
+        # overriding this method
+        slice_num = args
+        mask = np.logical_and(self.supercell_xyz[:, -1] >= slice_num * self.slice_t,
+                              self.supercell_xyz[:, -1] < (slice_num + 1) * self.slice_t)
+        # TODO create empty slice that is byte aligned using fftw
+        arr_slice = np.zeros(self.sampling, dtype=np.float32)
+        for Z, xyz in zip(self.supercell_Z[mask], self.supercell_xyz[mask]):
+            pot = self.cached_pots[Z]
+            x_pix, y_pix = xyz[:2] * self.sampling / self.dims[:2]
+            y_start, y_end = int(y_pix - pot.shape[0] / 2), int(y_pix + pot.shape[0] / 2)
+            x_start, x_end = int(x_pix - pot.shape[1] / 2), int(x_pix + pot.shape[1] / 2)
+            repl_y = slice(max(y_start, 0), y_end)
+            repl_x = slice(max(x_start, 0), x_end)
+            offset_y = abs(min(y_start, 0))
+            offset_x = abs(min(x_start, 0))
+            repl_shape = arr_slice[repl_y, repl_x].shape
+            arr_slice[repl_y, repl_x] += pot[offset_y:repl_shape[0] + offset_y, offset_x:repl_shape[1] + offset_x]
+        return np.exp(1.j * self.sigma * arr_slice)
+
+    def _load_kernels(self):
         try:
             probe_kernels = ProbeKernels(sampling=self.sampling)
             self.kernels = probe_kernels.kernels
@@ -403,11 +437,12 @@ class MSAGPU(MSAHybrid):
             warn('CUDA C/C++ Kernels did not compile successfully')
             raise cuda.CompileError
 
-    def build_probe(self, probe_dict={'smooth_apert': True, 'apert_smooth': 50,
-                                                                        'spherical_phase': True, 'aberration_dict':
-                                                                            {'C1': 0., 'C3': 0., 'C5': 0.},
-                                                                        'scherzer': True}):
-        # prepare arguments
+    def build_probe(self, probe_dict={'smooth_apert': True, 'apert_smooth': 50, 'spherical_phase': True,
+                                      'aberration_dict': {'C1': 0., 'C3': 0., 'C5': 0.},'scherzer': True}
+                    ):
+
+        # load kernels and prepare func args
+        self._load_kernels()
         aber_dict = probe_dict['aberration_dict']
         k_semi = np.float32(self.semi_ang / self.Lambda)
         k_max, Lambda, C1, C3, C5 = [np.float32(itm) for itm in [self.kmax, self.Lambda, aber_dict['C1'],
@@ -416,21 +451,8 @@ class MSAGPU(MSAHybrid):
             C1, _ = scherzer_params(self.Lambda, aber_dict['C3'])
             C1 = np.float32(C1)
 
-
-        # define block/grid threads
-        shape_x = np.int32(self.sampling[1])
-        shape_y = np.int32(self.sampling[0])
-        block = (32, 32, 1)
-        grid = (int((shape_x + block[0] - 1)/32), int((shape_y + block[1] - 1)/32), 1)
-
-        # allocate memory
-        self.apert = np.empty(self.sampling, dtype=np.float32)
-        apert_d = cuda.mem_alloc(self.apert.nbytes)
-        self.psi_k = np.empty(self.sampling, dtype=np.complex64)
-        psi_k_d = cuda.mem_alloc(self.psi_k.nbytes)
-
         # grab appropriate kernels
-        multwise_2d_func = self.kernels['mult_wise_c2d_re2d']
+        self.multwise_2d_func = self.kernels['mult_wise_c2d_re2d']
         fftshift_func = self.kernels['fftshift_2d']
         if probe_dict['smooth_apert']:
             apert_func = self.kernels['soft_aperture']
@@ -440,31 +462,45 @@ class MSAGPU(MSAHybrid):
             phase_func = self.kernels['spherical_phase_error']
         else:
             pass
-            #TODO: implement non-rotationally invariant phase error kernel
+            # TODO: implement non-rotationally invariant phase error kernel
 
-        # 1. build a probe in k-space
+        # define block/grid threads
+        shape_x = np.int32(self.sampling[1])
+        shape_y = np.int32(self.sampling[0])
+        block, grid = self._get_blockgrid([shape_x, shape_y], mode='2D')
+
+        # allocate memory
+        self.apert = np.empty(self.sampling, dtype=np.float32)
+        apert_d = cuda.mem_alloc(self.apert.nbytes)
+        self.psi_k = np.empty(self.sampling, dtype=np.complex64)
+        psi_k_d = cuda.mem_alloc(self.psi_k.nbytes)
+
+        # build a probe in k-space
         apert_func(apert_d, k_max, k_semi, shape_x, shape_y, block=block, grid=grid, shared=0)
+        #pycuda.autoinit.context.synchronize()
         phase_func(psi_k_d, k_max, Lambda, C1, C3, C5, shape_x, shape_y, block=block, grid=grid, shared=0)
-        multwise_2d_func(psi_k_d, apert_d, shape_x, shape_y, block=block, grid=grid)
+        #pycuda.autoinit.context.synchronize()
+        self.multwise_2d_func(psi_k_d, apert_d, shape_x, shape_y, block=block, grid=grid)
+        #pycuda.autoinit.context.synchronize()
         cuda.memcpy_dtoh_async(self.psi_k, psi_k_d)
         cuda.memcpy_dtoh_async(self.apert, apert_d)
 
-        # 2. build probe in x-space
+        # build probe in x-space
         psi_x = pycuda.gpuarray.GPUArray(self.psi_k.shape, self.psi_k.dtype)
         psi_k = pycuda.gpuarray.GPUArray(self.psi_k.shape, self.psi_k.dtype, allocator=psi_k_d, gpudata=psi_k_d)
         fft_plan = cufft.Plan(psi_k.shape, np.complex64, np.complex64, batch=1)
         cufft.ifft(psi_k, psi_x, fft_plan, False)
+        #pycuda.autoinit.context.synchronize()
         fftshift_func(psi_x, shape_x, shape_y, block=block, grid=grid)
-        self.psi_x = psi_x.get()
-        self.psi_x /= np.sqrt(np.sum(np.abs(self.psi_x)**2))
+        #pycuda.autoinit.context.synchronize()
+        self.psi = psi_x.get()
+        self.psi /= np.sqrt(np.sum(np.abs(self.psi)**2))
 
         # free gpu mem
         psi_x.gpudata.free()
         psi_k_d.free()
         apert_d.free()
         cufft.cufft.cufftDestroy(fft_plan.handle)
-
-        return self.psi_x, self.psi_k, self.apert
 
     def generate_probe_positions(self, probe_step=np.array([0.1, 0.1]), probe_range=np.array([[0., 1.0], [0., 1.0]])):
         grid_steps_x, grid_steps_y = np.floor(np.diff(probe_range).flatten() * self.dims[:2] / probe_step).astype(np.int)
@@ -477,60 +513,131 @@ class MSAGPU(MSAHybrid):
         self.grid_range = np.array([grid_range_x, grid_range_y]).flatten()
         self.probe_positions = probe_pos
 
-    def multislice(self):
-        if isinstance(self.probe_positions, np.ndarray) is False:
-            warn('Probe positions must be calculated first before calling multislice')
-            return
-        # prepare arguments
-        grid_range_d = pycuda.gpuarray.to_gpu_async(self.grid_range.astype(np.float32))
-        grid_step_d = pycuda.gpuarray.to_gpu_async(self.grid_steps.astype(np.int32))
-        psi_k_d = pycuda.gpuarray.to_gpu_async(self.psi_k)
-        num_probes = np.int32(self.probe_positions.shape[0])
-
+    @staticmethod
+    def _get_blockgrid(shapes, mode='2D'):
         # define block/grid threads
+        if mode == '3D':
+            shape_x = shapes[0]
+            shape_y = shapes[1]
+            shape_z = shapes[2]
+            blk_zsize = 1
+            blk_xsize = 32
+            blk_ysize = 32
+            grid_xsize = int((shape_x + blk_xsize - 1) / blk_xsize)
+            grid_ysize = int((shape_y + blk_ysize - 1) / blk_ysize)
+            grid_zsize = int((shape_z + blk_zsize - 1) / blk_zsize)
+            block_3d = (blk_xsize, blk_ysize, blk_zsize)
+            grid_3d = (grid_xsize, grid_ysize, grid_zsize)
+            return block_3d, grid_3d
+        if mode == '2D':
+            shape_x = shapes[0]
+            shape_y = shapes[1]
+            block_2d = (32, 32, 1)
+            grid_2d = (int((shape_x + block_2d[0] - 1) / 32), int((shape_y + block_2d[1] - 1) / 32), 1)
+            return block_2d, grid_2d
+
+    def multislice(self, bandwidth=1/3):
+
+        # checks
+        if isinstance(self.potential_slices, np.ndarray) is False:
+            warn('Potential slices must be calculated first before calling multi_slice\n. '
+                 'Call method build_potential_slices().')
+            return
+        if isinstance(self.psi_k, np.ndarray) is False:
+            warn('Probe in k-space must be initiated first before calling multi_slice\n. '
+                 'Call method build_probe().')
+            return
+        if isinstance(self.probe_positions, np.ndarray) is False:
+            warn('Probe positions must be calculated first before calling multislice\n. '
+                 'Call method generate_probe_positions().')
+            return
+
+        # load cuda kernels and prepare arguments
+        self._load_kernels()
+        num_probes = np.int32(self.probe_positions.shape[0])
         shape_x = np.int32(self.sampling[1])
         shape_y = np.int32(self.sampling[0])
-        blk_zsize = 4
-        blk_xsize = 16
-        blk_ysize = 16
-        grid_xsize = int((shape_x + blk_xsize - 1) / blk_xsize)
-        grid_ysize = int((shape_y + blk_ysize - 1) / blk_ysize)
-        grid_zsize = int((num_probes + blk_zsize - 1) / blk_zsize)
-        block = (blk_xsize, blk_ysize, blk_zsize)
-        grid = (grid_xsize, grid_ysize, grid_zsize)
+        self.plan_simulation(num_probes=num_probes)
+        num_probes = self.batch
+
+        # define block/grid threads
+        block_3d, grid_3d = self._get_blockgrid([self.sampling[1], self.sampling[0], num_probes], mode='3D')
+        block_2d, grid_2d = self._get_blockgrid([self.sampling[1], self.sampling[0], num_probes], mode='2D')
+        print('block, grid:', block_3d, grid_3d)
+
+        # setup fft plan
+        fft_plan_probe = cufft.Plan(self.sampling, np.complex64, np.complex64, batch=num_probes)
 
         # allocate memory
-        psi_pos_h = np.empty((num_probes, shape_y, shape_x), dtype=np.complex64)
-        psi_pos_d = cuda.mem_alloc(psi_pos_h.nbytes)
+        self.probes = np.empty((num_probes, shape_y, shape_x), dtype=np.complex64)
+        psi_pos_d = cuda.mem_alloc(self.probes.nbytes)
+        self.propag = np.empty(self.sampling, dtype=np.complex64)
+        propag_d = cuda.to_device(self.propag)
+        self.mask = np.empty(self.sampling, dtype=np.float32)
+        mask_d = cuda.to_device(self.mask)
+        atom_slices = pycuda.gpuarray.to_gpu_async(self.potential_slices)
 
         # grab needed kernels
         probe_stack_func = self.kernels['probes_stack']
+        propag_func = self.kernels['propagator']
+        mask_func = self.kernels['hard_aperture']
+        multwise_stack_func = self.kernels['mult_wise_c3d_c2d']
+        multwise_func = self.kernels['mult_wise_c2d_re2d']
         fftshift_func = self.kernels['fftshift_2d_stack']
 
-        # build probes
-        probe_stack_func(psi_pos_d, psi_k_d, num_probes, np.float32(self.kmax), grid_step_d, grid_range_d,
-                           block=block, grid=grid)
-        psi_x_pos = pycuda.gpuarray.GPUArray(psi_pos_h.shape, psi_pos_h.dtype)
-        psi_k_pos = pycuda.gpuarray.GPUArray(psi_pos_h.shape, psi_pos_h.dtype, allocator=psi_pos_d, gpudata=psi_pos_d)
-        fft_plan = cufft.Plan(self.psi_k.shape, np.complex64, np.complex64, batch=num_probes)
-        cufft.ifft(psi_k_pos, psi_x_pos, fft_plan, False)
-        fftshift_func(psi_x_pos, shape_x, shape_y, block=block, grid=grid)
+        #1. build probes
+        probe_stack_func(psi_pos_d, cuda.In(self.psi_k), num_probes, np.float32(self.kmax),
+        cuda.In(self.grid_steps.astype(np.float32)), cuda.In(self.grid_range.astype(np.float32)),
+                           block=block_3d, grid=grid_3d, shared=0)
+        #pycuda.autoinit.context.synchronize()
+        psi_x_pos = pycuda.gpuarray.GPUArray(self.probes.shape, self.probes.dtype, allocator=psi_pos_d, gpudata=psi_pos_d)
+        cufft.ifft(psi_x_pos, psi_x_pos, fft_plan_probe, False)
+        #pycuda.autoinit.context.synchronize()
+        fftshift_func(psi_x_pos, block=block_3d, grid=grid_3d, shared=0)
+        #pycuda.autoinit.context.synchronize()
+        # TODO: normalization kernel
 
-        # free gpu mem
+
+        # 2. Build propagator and bandwidth limiting mask
+        self.slice_t = 1.25
+        mask_func(mask_d, np.float32(self.kmax), np.float32(bandwidth * self.kmax), shape_x, shape_y, block=block_2d,
+                  grid=grid_2d, shared=0)
+        pycuda.autoinit.context.synchronize()
+        propag_func(propag_d, np.float32(self.kmax), np.float32(1.0), np.float32(self.Lambda), shape_x, shape_y,
+                    block=block_2d, grid=grid_2d, shared=0)
+        pycuda.autoinit.context.synchronize()
+        multwise_func(propag_d, mask_d, shape_x, shape_y, block=block_2d, grid=grid_2d, shared=0)
+        cuda.memcpy_dtoh_async(self.propag, propag_d)
+        cuda.memcpy_dtoh_async(self.mask, mask_d)
+
+        # 3. Propagate probes through atomic potential
+        t = time()
+        pycuda.autoinit.context.synchronize()
+        for i in range(self.num_slices):
+            self.print_debug('Atomic potential slice #%d' % i)
+            multwise_stack_func(psi_x_pos, atom_slices[i], num_probes, block=block_3d, grid=grid_3d, shared=0)
+            #pycuda.autoinit.context.synchronize()
+            cufft.fft(psi_x_pos, psi_x_pos, fft_plan_probe, True)
+            #pycuda.autoinit.context.synchronize()
+            multwise_stack_func(psi_x_pos, propag_d, num_probes, block=block_3d, grid=grid_3d, shared=0)
+            #pycuda.autoinit.context.synchronize()
+            cufft.ifft(psi_x_pos, psi_x_pos, fft_plan_probe, False)
+            #pycuda.autoinit.context.synchronize()
+
+        cufft.fft(psi_x_pos, psi_x_pos, fft_plan_probe, True)  #return probe wavefunctions in reciprocal space
+        #pycuda.autoinit.context.synchronize()
+        sim_t = time() - t
+        self.print_verbose('Propagated %d probes in %2.4f s' % (np.prod(self.grid_steps), sim_t))
+        cuda.memcpy_dtoh_async(self.probes,psi_pos_d)
+        #pycuda.autoinit.context.synchronize()
+
+        # Free memory
         psi_pos_d.free()
-        grid_range_d.gpudata.free()
-        grid_step_d.gpudata.free()
-        psi_k_d.gpudata.free()
-        cufft.cufft.cufftDestroy(fft_plan.handle)
+        atom_slices.gpudata.free()
+        mask_d.free()
+        propag_d.free()
+        cufft.cufft.cufftDestroy(fft_plan_probe.handle)
 
-        self.psi_x_pos = psi_x_pos.get()
-
-
-
-
-
-
-
-
-
-
+        free_mem, tot_mem = pycuda.driver.mem_get_info()
+        free_mem = free_mem / 1024e6  # in GB
+        self.print_verbose('free mem:', free_mem)

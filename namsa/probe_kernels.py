@@ -1,4 +1,3 @@
-import pycuda.driver as cuda
 from pycuda.tools import dtype_to_ctype
 import pycuda.autoinit
 from pycuda.compiler import SourceModule
@@ -8,6 +7,7 @@ import numpy as np
 cuda_kerns = Template("""
     // WITH
     #include <pycuda-complex.hpp>
+
     __device__ double calc_krad(float k_max, int size_x, int size_y, int col_idx, int row_idx){
         double kx = double(col_idx) * double(k_max)/double(size_x - 1) - double(k_max)/2. ;
         double ky = double(row_idx) * double(k_max)/double(size_y - 1) - double(k_max)/2. ;
@@ -17,10 +17,10 @@ cuda_kerns = Template("""
 
   __device__ float phase_shift(float k_max, int size_x, int size_y, int col_idx, int row_idx, int stk_idx,
           int *grid_step, float *grid_range)
-    {   
+    {
         const double pi = acos(-1.0);
-        float kx = float(col_idx) * k_max/float(size_x - 1) - k_max/2.; 
-        float ky = float(row_idx) * k_max/float(size_y - 1) - k_max/2.; 
+        float kx = float(col_idx) * k_max/float(size_x - 1) - k_max/2.;
+        float ky = float(row_idx) * k_max/float(size_y - 1) - k_max/2.;
         int grid_step_x = grid_step[0];
         int grid_step_y = grid_step[1];
         int grid_start_x = grid_range[0];
@@ -46,7 +46,7 @@ cuda_kerns = Template("""
         }
     }
 
-    __global__ void real_complex_elementwisemult (pycuda::complex<float> *arr_cmpx, float *arr_real,
+    __global__ void mult_wise_c2d_re2d (pycuda::complex<float> *arr_cmpx, float *arr_real,
     int size_x, int size_y) {
         int row_idx =  blockDim.y * blockIdx.y + threadIdx.y;
         int col_idx =  blockDim.x * blockIdx.x + threadIdx.x;
@@ -54,6 +54,33 @@ cuda_kerns = Template("""
         if (row_idx < size_y && col_idx < size_x)
         {
             arr_cmpx[idx] *= arr_real[idx];
+        }
+    }
+
+    __global__ void mult_wise_c3d_c2d (pycuda::complex<float> arr_3d[][{{y_sampling}}][{{x_sampling}}],
+    pycuda::complex<float> arr_2d[{{y_sampling}}][{{x_sampling}}], int z_size)
+    {
+        int row_idx =  blockDim.y * blockIdx.y + threadIdx.y;
+        int col_idx =  blockDim.x * blockIdx.x + threadIdx.x;
+        int stk_idx =  blockDim.z * blockIdx.z + threadIdx.z;
+        if (row_idx < {{y_sampling}} && col_idx < {{x_sampling}} && stk_idx < z_size)
+        {
+            arr_3d[stk_idx][row_idx][col_idx] *= arr_2d[row_idx][col_idx];
+        }
+    }
+
+    __global__ void propagator(pycuda::complex<float> *arr, float k_max, float t_slice,
+     float Lambda, int size_x, int size_y)
+    {
+        const double pi = acos(-1.0);
+        int row_idx =  blockDim.y * blockIdx.y + threadIdx.y;
+        int col_idx =  blockDim.x * blockIdx.x + threadIdx.x;
+        int idx = row_idx * size_x  + col_idx;
+        if (row_idx < size_y && col_idx < size_x)
+        {
+            float k_rad = calc_krad(k_max, size_x, size_y, col_idx, row_idx);
+            arr[idx]._M_re =  cosf(pi * k_rad * k_rad * Lambda * t_slice);
+            arr[idx]._M_im =  - sinf(pi * k_rad * k_rad * Lambda * t_slice);
         }
     }
 
@@ -99,8 +126,8 @@ cuda_kerns = Template("""
          arr[idx]._M_im = -sin(chi);
         }
     }
-
-
+    
+    //__global__ void int_potential(pycuda::complex<float> *arr_in, float k
     __global__ void build_probes_stack(pycuda::complex<float> psi_pos[][{{y_sampling}}][{{x_sampling}}],
                         pycuda::complex<float> psi_k[{{y_sampling}}][{{x_sampling}}],
                         int z_size, float k_max, int *grid_step, float *grid_range){
@@ -204,15 +231,18 @@ cuda_kerns = Template("""
 class ProbeKernels(object):
     def __init__(self, sampling=np.array([512, 512])):
         self.kernels = dict()
-        self.x_sampling= np.int(sampling[1])
-        self.y_sampling= np.int(sampling[0])
-        kernels = cuda_kerns.render(type= dtype_to_ctype(np.complex64), y_sampling=self.y_sampling, x_sampling=self.x_sampling)
+        self.x_sampling= np.int32(sampling[1])
+        self.y_sampling= np.int32(sampling[0])
+        kernels = cuda_kerns.render(type=dtype_to_ctype(np.complex64), y_sampling=self.y_sampling,
+                                    x_sampling=self.x_sampling)
         src = SourceModule(kernels)
         self.kernels['hard_aperture'] = src.get_function('hard_aperture')
         self.kernels['soft_aperture'] = src.get_function('soft_aperture')
         self.kernels['spherical_phase_error'] = src.get_function('spherical_phase_error')
-        self.kernels['mult_wise_c2d_re2d'] = src.get_function('real_complex_elementwisemult')
+        self.kernels['mult_wise_c2d_re2d'] = src.get_function('mult_wise_c2d_re2d')
         self.kernels['fftshift_2d'] = src.get_function('fftshift_2d')
         self.kernels['fftshift_2d_stack'] = src.get_function('fftshift_2d_stack')
         self.kernels['k_grid'] = src.get_function('k_grid')
         self.kernels['probes_stack'] = src.get_function('build_probes_stack')
+        self.kernels['mult_wise_c3d_c2d'] = src.get_function('mult_wise_c3d_c2d')
+        self.kernels['propagator'] = src.get_function('propagator')
