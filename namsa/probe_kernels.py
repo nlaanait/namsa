@@ -5,8 +5,8 @@ from jinja2 import Template
 import numpy as np
 
 class ProbeKernels(object):
-    def __init__(self, cuh_file, sampling=np.array([512, 512])):
-           with open(cuh_file, 'r') as f:
+    def __init__(self, cu_file, sampling=np.array([512, 512])):
+           with open(cu_file, 'r') as f:
                cuda_kerns = Template(f.read())
         self.kernels = dict()
         self.x_sampling= np.int32(sampling[1])
@@ -24,3 +24,5 @@ class ProbeKernels(object):
         self.kernels['probes_stack'] = src.get_function('build_probes_stack')
         self.kernels['mult_wise_c3d_c2d'] = src.get_function('mult_wise_c3d_c2d')
         self.kernels['propagator'] = src.get_function('propagator')
+        self.kernels['norm_const'] = src.get_function('norm_const')
+        self.kernels['normalize'] = src.get_function('normalize')
