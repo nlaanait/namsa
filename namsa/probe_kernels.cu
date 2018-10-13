@@ -21,18 +21,20 @@ __device__ float phase_shift(float k_max, int size_x, int size_y, int col_idx, i
     float ky = float(row_idx) * k_max/float(size_y - 1) - k_max/2.;
     int grid_step_x = grid_step[0];
     int grid_step_y = grid_step[1];
-    int grid_start_x = grid_range[0];
-    int grid_end_x = grid_range[1];
-    int grid_start_y = grid_range[2];
-    int grid_end_y = grid_range[3];
-    float ry_idx = rintf(floorf(stk_idx * 1.f / grid_step_y));
+    float grid_start_x = grid_range[0];
+    float grid_end_x = grid_range[1];
+    float grid_start_y = grid_range[2];
+    float grid_end_y = grid_range[3];
+    float ry_idx = rintf(floorf(stk_idx * 1.f  / grid_step_y));
     float rx_idx = stk_idx - ry_idx * grid_step_x;
     float ry = ry_idx * (grid_end_y - grid_start_y) / (grid_step_y - 1) + grid_start_y;
     float rx = rx_idx * (grid_end_x - grid_start_x) / (grid_step_x - 1) + grid_start_x;
-    float kr =  - kx * rx - ky * ry;
+    float kr = - kx * rx - ky * ry;
     return kr;
 }
 
+
+//TODO: 2d vectorize the indexing [idx]
 __global__ void norm_const(pycuda::complex<float> arr[][{{x_sampling}} * {{y_sampling}}], float *norm, int size_z) {
   float sum = 0.f;
   int stk_idx = blockIdx.y * blockDim.y + threadIdx.y;

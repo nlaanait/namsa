@@ -3,14 +3,18 @@ import pycuda.autoinit
 from pycuda.compiler import SourceModule
 from jinja2 import Template
 import numpy as np
+import namsa
+import os
 
 class ProbeKernels(object):
-    def __init__(self, cu_file, sampling=np.array([512, 512])):
-           with open(cu_file, 'r') as f:
-               cuda_kerns = Template(f.read())
+    def __init__(self, cu_file=None, sampling=np.array([512, 512])):
+        if cu_file is None:
+            cu_file = os.path.join(namsa.__path__[0], 'probe_kernels.cu')
+        with open(cu_file, 'r') as f:
+            cuda_kerns = Template(f.read())
         self.kernels = dict()
-        self.x_sampling= np.int32(sampling[1])
-        self.y_sampling= np.int32(sampling[0])
+        self.x_sampling = np.int32(sampling[1])
+        self.y_sampling = np.int32(sampling[0])
         kernels = cuda_kerns.render(type=dtype_to_ctype(np.complex64), y_sampling=self.y_sampling,
                                     x_sampling=self.x_sampling)
         src = SourceModule(kernels)
