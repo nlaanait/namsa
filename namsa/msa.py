@@ -315,18 +315,37 @@ class MSAHybrid(MSA):
         #     print("cuInit failed ")
         #     return
 
-    def plan_simulation(self, num_probes=64):
-        self.num_probes = num_probes
+    def plan_simulation(self, num_probes=None):
+        if num_probes is None:
+            num_probes = self.num_probes
+        try:
+            plan = cufft.Plan(self.psi_k.shape, np.complex64, np.complex64, batch=num_probes)
+        except:
+            warn('Current fft plan is not valid. Decrease # probe positions!')
         free_mem, tot_mem = pycuda.driver.mem_get_info()
         self.free_mem = free_mem/1024e6  # in GB
         mem_alloc = num_probes * np.prod(self.sampling) * 8 / 1024e6 + self.potential_slices.nbytes / 1024e6
-        print('mem_alloc:',mem_alloc)
-        print('free_mem:',self.free_mem)
+        self.print_verbose('mem_alloc:',mem_alloc)
+        self.print_verbose('free_mem:',self.free_mem)
+        self.batch = num_probes
         while mem_alloc > 0.95 * self.free_mem:
+            try:
+                cuff.cufft.cufft.cufftDestroy(plan.handle)
+            except:
+                warn('Current fft plan is not valid. Decreasing # probe positions.')
             num_probes = num_probes // 2
+            plan = cufft.Plan(self.psi_k.shape, np.complex64, np.complex64, batch=num_probes)
+            free_mem, tot_mem = pycuda.driver.mem_get_info()
+            self.free_mem = free_mem/1024e6  # in GB
             mem_alloc = num_probes * np.prod(self.sampling) * 8 / 1024e6 + self.potential_slices.nbytes / 1024e6
         self.batch = num_probes
-        self.print_verbose('Simulation will propagate %d probes simultaneously' % self.num_probes)
+        self.print_verbose('Simulation will propagate %d probes simultaneously' % num_probes)
+        try:
+            cufft.cufft.cufftDestroy(plan.handle)
+        except:
+            warn('Current fft plan is not valid. Decrease # probe positions\n'
+            'and plan_simulation() again.')
+            sys.exit(1)
 
     def multislice(self, save_probes=True, bandwidth=1/3):
         # not supporting a single probe!!
@@ -515,6 +534,7 @@ class MSAGPU(MSAHybrid):
         self.grid_steps = np.array([grid_steps_x, grid_steps_y])
         self.grid_range = np.array([grid_range_x, grid_range_y]).flatten()
         self.probe_positions = probe_pos
+        self.num_probes = np.int32(probe_pos.shape[0])
 
     @staticmethod
     def _get_blockgrid(shapes, mode='2D'):
@@ -564,10 +584,9 @@ class MSAGPU(MSAHybrid):
 
         # load cuda kernels and prepare arguments
         self._load_kernels()
-        num_probes = np.int32(self.probe_positions.shape[0])
         shape_x = np.int32(self.sampling[1])
         shape_y = np.int32(self.sampling[0])
-        self.plan_simulation(num_probes=num_probes)
+        self.plan_simulation(num_probes=None)
         num_probes = self.batch
         k_semi = np.float32(self.semi_ang / self.Lambda)
 
@@ -646,7 +665,7 @@ class MSAGPU(MSAHybrid):
         cufft.fft(psi_x_pos, psi_x_pos, fft_plan_probe, True)  #return probe wavefunctions in reciprocal space
         #pycuda.autoinit.context.synchronize()
         sim_t = time() - t
-        self.print_verbose('Propagated %d probes in %2.4f s' % (np.prod(self.grid_steps), sim_t))
+        self.print_verbose('Propagated %d probes in %2.4f s' % (self.batch, sim_t))
         self.probes = psi_x_pos.get()
         #pycuda.autoinit.context.synchronize()
 
