@@ -583,10 +583,10 @@ class MSAGPU(MSAHybrid):
             return
 
         # load cuda kernels and prepare arguments
-        self._load_kernels()
+        #self._load_kernels()
         shape_x = np.int32(self.sampling[1])
         shape_y = np.int32(self.sampling[0])
-        self.plan_simulation(num_probes=None)
+        #self.plan_simulation(num_probes=None)
         num_probes = self.batch
         k_semi = np.float32(self.semi_ang / self.Lambda)
 
@@ -601,14 +601,86 @@ class MSAGPU(MSAHybrid):
 
         # allocate memory
         self.probes = np.empty((num_probes, shape_y, shape_x), dtype=np.complex64)
-        psi_pos_d = cuda.mem_alloc(self.probes.nbytes)
+        # psi_pos_d = cuda.mem_alloc(self.probes.nbytes)
         self.propag = np.empty(self.sampling, dtype=np.complex64)
         propag_d = cuda.to_device(self.propag)
         self.mask = np.empty(self.sampling, dtype=np.float32)
         mask_d = cuda.to_device(self.mask)
         atom_slices = pycuda.gpuarray.to_gpu_async(self.potential_slices)
+        # self.norm = np.empty((num_probes,), dtype=np.float32)
+        # norm_const_d = cuda.mem_alloc(self.norm.nbytes)
+
+        # grab needed kernels
+        probe_stack_func = self.kernels['probes_stack']
+        propag_func = self.kernels['propagator']
+        mask_func = self.kernels['hard_aperture']
+        multwise_stack_func = self.kernels['mult_wise_c3d_c2d']
+        multwise_func = self.kernels['mult_wise_c2d_re2d']
+        fftshift_func = self.kernels['fftshift_2d_stack']
+        norm_const_func = self.kernels['norm_const']
+        normalize_func = self.kernels['normalize']
+
+        # #1. build probes
+        # probe_stack_func(psi_pos_d, cuda.In(self.psi_k), num_probes, np.float32(self.kmax),
+        # cuda.In(self.grid_steps.astype(np.int32)), cuda.In(self.grid_range.astype(np.float32)),
+        #                    block=block_3d, grid=grid_3d, shared=0)
+        # #pycuda.autoinit.context.synchronize()
+        # psi_x_pos = pycuda.gpuarray.GPUArray(self.probes.shape, self.probes.dtype, allocator=psi_pos_d, gpudata=psi_pos_d)
+        # cufft.ifft(psi_x_pos, psi_x_pos, fft_plan_probe, False)
+        # #pycuda.autoinit.context.synchronize()
+        # fftshift_func(psi_x_pos, block=block_3d, grid=grid_3d, shared=0)
+        # #pycuda.autoinit.context.synchronize()
+        # norm_const_func(psi_x_pos, norm_const_d, num_probes, block=block_1d, grid=grid_1d)
+        # # pycuda.autoinit.context.synchronize()
+        # normalize_func(psi_x_pos, norm_const_d, num_probes, block=block_3d, grid=grid_3d)
+        # cuda.memcpy_dtoh_async(self.norm, norm_const_d)
+        # # self.probes = psi_x_pos.get()
+        # # pycuda.autoinit.context.synchronize()
+
+        # 1. Build propagator and bandwidth limiting mask
+        mask_func(mask_d, np.float32(self.kmax), np.float32(bandwidth * self.kmax), shape_x, shape_y, block=block_2d,
+                  grid=grid_2d, shared=0)
+        #pycuda.autoinit.context.synchronize()
+        propag_func(propag_d, np.float32(self.kmax), np.float32(self.slice_t), np.float32(self.Lambda), shape_x, shape_y,
+                    block=block_2d, grid=grid_2d, shared=0)
+        #pycuda.autoinit.context.synchronize()
+        multwise_func(propag_d, mask_d, shape_x, shape_y, block=block_2d, grid=grid_2d, shared=0)
+        cuda.memcpy_dtoh_async(self.propag, propag_d)
+        cuda.memcpy_dtoh_async(self.mask, mask_d)
+        #num_batches = self.num_probes//self.batch
+        batch_size = 64
+        num_batches = self.num_probes//batch_size
+        batches = []
+        streams = []
+        # plans = []
+        for batch_num in range(num_batches+1):
+            batches.append(slice(batch_num * batch_size, (batch_num + 1) * batch_size))
+            stream=cuda.Stream()
+            streams.append(stream)
+            # plans.append(cufft.Plan(self.sampling, np.complex64, np.complex64,
+            # batch=num_probes, stream=stream))
+        for batch, stream in zip(batches, streams):
+            print('batch: %s' %format(batch))
+            #plan = cufft.Plan(self.sampling, np.complex64, np.complex64,
+            #batch=num_probes, stream=stream)
+            self.propagate_beams(batch, propag_d, atom_slices, stream)
+
+    def propagate_beams(self, batch,  propag_d, atom_slices, stream):
+
+        # allocate memory
+        num_probes = np.int32(self.probe_positions[batch].shape[0])
         self.norm = np.empty((num_probes,), dtype=np.float32)
         norm_const_d = cuda.mem_alloc(self.norm.nbytes)
+        psi_pos_d = cuda.mem_alloc(int(num_probes * np.prod(self.sampling) * 8))
+
+        # make plan
+        fft_plan_probe = cufft.Plan(self.sampling, np.complex64, np.complex64,
+        batch=num_probes, stream=stream)
+
+        # define block/grid threads
+        block_3d, grid_3d = self._get_blockgrid([self.sampling[1], self.sampling[0], num_probes], mode='3D')
+        block_1d, grid_1d = self._get_blockgrid([self.sampling[1], self.sampling[0], num_probes], mode='1D')
+        self.print_debug('block, grid:', block_3d, grid_3d)
 
         # grab needed kernels
         probe_stack_func = self.kernels['probes_stack']
@@ -625,7 +697,9 @@ class MSAGPU(MSAHybrid):
         cuda.In(self.grid_steps.astype(np.int32)), cuda.In(self.grid_range.astype(np.float32)),
                            block=block_3d, grid=grid_3d, shared=0)
         #pycuda.autoinit.context.synchronize()
-        psi_x_pos = pycuda.gpuarray.GPUArray(self.probes.shape, self.probes.dtype, allocator=psi_pos_d, gpudata=psi_pos_d)
+        psi_x_pos_h = np.empty((num_probes, self.sampling[0], self.sampling[1]), dtype=np.complex64)
+        psi_x_pos = pycuda.gpuarray.GPUArray(psi_x_pos_h.shape, psi_x_pos_h.dtype,
+                        allocator=psi_pos_d, gpudata=psi_pos_d)
         cufft.ifft(psi_x_pos, psi_x_pos, fft_plan_probe, False)
         #pycuda.autoinit.context.synchronize()
         fftshift_func(psi_x_pos, block=block_3d, grid=grid_3d, shared=0)
@@ -633,24 +707,14 @@ class MSAGPU(MSAHybrid):
         norm_const_func(psi_x_pos, norm_const_d, num_probes, block=block_1d, grid=grid_1d)
         # pycuda.autoinit.context.synchronize()
         normalize_func(psi_x_pos, norm_const_d, num_probes, block=block_3d, grid=grid_3d)
-        cuda.memcpy_dtoh_async(self.norm, norm_const_d)
+        cuda.memcpy_dtoh_async(self.norm, norm_const_d, stream=stream)
         # self.probes = psi_x_pos.get()
         # pycuda.autoinit.context.synchronize()
 
-        # 2. Build propagator and bandwidth limiting mask
-        mask_func(mask_d, np.float32(self.kmax), np.float32(bandwidth * self.kmax), shape_x, shape_y, block=block_2d,
-                  grid=grid_2d, shared=0)
-        #pycuda.autoinit.context.synchronize()
-        propag_func(propag_d, np.float32(self.kmax), np.float32(self.slice_t), np.float32(self.Lambda), shape_x, shape_y,
-                    block=block_2d, grid=grid_2d, shared=0)
-        #pycuda.autoinit.context.synchronize()
-        multwise_func(propag_d, mask_d, shape_x, shape_y, block=block_2d, grid=grid_2d, shared=0)
-        cuda.memcpy_dtoh_async(self.propag, propag_d)
-        cuda.memcpy_dtoh_async(self.mask, mask_d)
 
-        # 3. Propagate probes through atomic potential
+        # 2. Propagate probes through atomic potential
         t = time()
-        pycuda.autoinit.context.synchronize()
+        # pycuda.autoinit.context.synchronize()
         for i in range(self.num_slices):
             self.print_debug('Atomic potential slice #%d' % i)
             multwise_stack_func(psi_x_pos, atom_slices[i], num_probes, block=block_3d, grid=grid_3d, shared=0)
@@ -664,17 +728,19 @@ class MSAGPU(MSAHybrid):
 
         cufft.fft(psi_x_pos, psi_x_pos, fft_plan_probe, True)  #return probe wavefunctions in reciprocal space
         #pycuda.autoinit.context.synchronize()
+        #sim_t = time() - t
+        #self.print_verbose('Propagated %d probes in %2.4f s' % (psi_x_pos_h.shape[0], sim_t))
+        self.probes = psi_x_pos.get_async(stream=stream)
         sim_t = time() - t
-        self.print_verbose('Propagated %d probes in %2.4f s' % (self.batch, sim_t))
-        self.probes = psi_x_pos.get()
+        self.print_verbose('Propagated %d probes in %2.4f s' % (psi_x_pos_h.shape[0], sim_t))
         #pycuda.autoinit.context.synchronize()
 
         # Free memory
         psi_pos_d.free()
-        atom_slices.gpudata.free()
+        # atom_slices.gpudata.free()
         norm_const_d.free()
-        mask_d.free()
-        propag_d.free()
+        # mask_d.free()
+        # propag_d.free()
         #norm_const_d.free()
         # norm_const_d.free()
         cufft.cufft.cufftDestroy(fft_plan_probe.handle)
