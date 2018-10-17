@@ -86,13 +86,18 @@ __global__ void mult_wise_c2d_re2d (pycuda::complex<float> *arr_cmpx, float *arr
 }
 
 __global__ void mult_wise_c3d_c2d (pycuda::complex<float> arr_3d[][{{y_sampling}}][{{x_sampling}}],
-    pycuda::complex<float> arr_2d[{{y_sampling}}][{{x_sampling}}], int z_size){
+    pycuda::complex<float> arr_2d[{{y_sampling}}][{{x_sampling}}], int z_size, int scale){
     int row_idx =  blockDim.y * blockIdx.y + threadIdx.y;
     int col_idx =  blockDim.x * blockIdx.x + threadIdx.x;
     int stk_idx =  blockDim.z * blockIdx.z + threadIdx.z;
     if (row_idx < {{y_sampling}} && col_idx < {{x_sampling}} && stk_idx < z_size)
     {
         arr_3d[stk_idx][row_idx][col_idx] *= arr_2d[row_idx][col_idx];
+        if ( scale == 1 )
+        {
+            //float scale = (float) {{y_sampling}} * {{x_sampling}} * 1.f;
+            arr_3d[stk_idx][row_idx][col_idx] *= {{y_sampling}} * {{x_sampling}} * 1.f;
+        }
     }
 }
 
