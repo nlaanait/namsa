@@ -93,11 +93,6 @@ __global__ void mult_wise_c3d_c2d (pycuda::complex<float> arr_3d[][{{y_sampling}
     if (row_idx < {{y_sampling}} && col_idx < {{x_sampling}} && stk_idx < z_size)
     {
         arr_3d[stk_idx][row_idx][col_idx] *= arr_2d[row_idx][col_idx] * scale;
-       // if ( scale == 1 )
-       // {
-            //float scale = (float) {{y_sampling}} * {{x_sampling}} * 1.f;
-      //      arr_3d[stk_idx][row_idx][col_idx] *= {{y_sampling}} * {{x_sampling}} * 1.f;
-      //  }
     }
 }
 
