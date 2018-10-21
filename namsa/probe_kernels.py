@@ -1,5 +1,5 @@
 from pycuda.tools import dtype_to_ctype
-import pycuda.autoinit
+# import pycuda.autoinit
 from pycuda.compiler import SourceModule
 from jinja2 import Template
 import numpy as np

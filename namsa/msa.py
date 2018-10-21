@@ -15,6 +15,7 @@ import pycuda.driver as cuda
 import skcuda.fft as skfft
 import skcuda.cufft as cufft
 from time import time
+from mpi4py import MPI
 
 
 XYZ_dtype = [('atomic_number', 'i'), ('x', 'f'), ('y', 'f'), ('z', 'f'), ('occ', 'f'), ('DW', 'f')]
@@ -307,13 +308,23 @@ class MSA(object):
 
 
 class MSAHybrid(MSA):
-    def setup_device(self, dev_num=0):
-        # TODO: setup device or devices...
-        pycuda.tools.make_default_context()
-        # result = pycuda.cuInit(dev_num)
-        # if result != 0:
-        #     print("cuInit failed ")
-        #     return
+    def setup_device(self, gpu_rank=0):
+        global ctx
+        cuda.init()
+        dev = cuda.Device(gpu_rank)
+        ctx = dev.make_context()
+        # ctx.attach()
+        self.gpu_rank = gpu_rank
+
+        import atexit
+        def _clean_up():
+            global ctx
+            ctx.pop()
+            ctx = None
+            from pycuda.tools import clear_context_caches
+            clear_context_caches()
+
+        atexit.register(_clean_up)
 
     def plan_simulation(self, num_probes=None):
         if num_probes is None:
@@ -401,7 +412,6 @@ class MSAHybrid(MSA):
 
 
 class MSAGPU(MSAHybrid):
-
     def build_potential_slices(self, slice_thickness):
         self.slice_t = slice_thickness
         self.num_slices = np.int32(np.floor(self.dims[-1] / slice_thickness))
@@ -489,20 +499,20 @@ class MSAGPU(MSAHybrid):
 
         # build a probe in k-space
         apert_func(apert_d, k_max, k_semi, shape_x, shape_y, block=block, grid=grid, shared=0, stream=cuda.Stream())
-        #pycuda.autoinit.context.synchronize()
+        #ctx.synchronize()
         phase_func(psi_k_d, k_max, Lambda, C1, C3, C5, shape_x, shape_y, block=block, grid=grid, shared=0, stream=cuda.Stream())
-        #pycuda.autoinit.context.synchronize()
+        #ctx.synchronize()
         self.multwise_2d_func(psi_k_d, apert_d, shape_x, shape_y, block=block, grid=grid)
-        #pycuda.autoinit.context.synchronize()
+        #ctx.synchronize()
         cuda.memcpy_dtoh_async(self.psi_k, psi_k_d, cuda.Stream())
         cuda.memcpy_dtoh_async(self.apert, apert_d, cuda.Stream())
 
         # build probe in x-space
         fft_plan = skfft.Plan(self.psi_k.shape, np.complex64, np.complex64, batch=1)
         cufft.cufftExecC2C(fft_plan.handle, int(psi_k_d), int(psi_x_d), cufft.CUFFT_INVERSE)
-        #pycuda.autoinit.context.synchronize()
+        #ctx.synchronize()
         fftshift_func(psi_x_d, shape_x, shape_y, block=block, grid=grid)
-        #pycuda.autoinit.context.synchronize()
+        #ctx.synchronize()
         cuda.memcpy_dtoh_async(self.psi, psi_x_d, cuda.Stream())
         self.psi /= np.sqrt(np.sum(np.abs(self.psi)**2))
         cuda.memcpy_dtoh_async(self.psi_k, psi_k_d, cuda.Stream())
@@ -619,10 +629,10 @@ class MSAGPU(MSAHybrid):
         # 1. Build propagator and bandwidth limiting mask
         mask_func(mask_d, np.float32(self.kmax), np.float32(bandwidth * self.kmax), shape_x, shape_y, block=block_2d,
                   grid=grid_2d, shared=0, stream=cuda.Stream())
-        #pycuda.autoinit.context.synchronize()
+        #ctx.synchronize()
         propag_func(propag_d, np.float32(self.kmax), np.float32(self.slice_t), np.float32(self.Lambda), shape_x, shape_y,
                     block=block_2d, grid=grid_2d, shared=0, stream=cuda.Stream())
-        #pycuda.autoinit.context.synchronize()
+        #ctx.synchronize()
         multwise_func(propag_d, mask_d, shape_x, shape_y, block=block_2d, grid=grid_2d, shared=0)
         cuda.memcpy_dtoh_async(self.propag, propag_d, cuda.Stream())
         cuda.memcpy_dtoh_async(self.mask, mask_d, cuda.Stream())
@@ -671,15 +681,15 @@ class MSAGPU(MSAHybrid):
                 self.print_debug('batch: %s' % format(batch))
                 self.__propagate_beams(num_probes, batch, probe_d, propag_d, psi_k_d, norm_const, grid_steps_d, grid_range_d, pot_slices_d,
                                      self.probes[phase][batch], plan, ones_d, stream)
-            pycuda.autoinit.context.synchronize()
+            ctx.synchronize()
         # 4. clean-up
             for plan, probe_d, norm_const in zip(plans, probes_d, norm_consts):
                cufft.cufftDestroy(plan.handle)
                probe_d.free()
                norm_const.free()
-               pycuda.autoinit.context.synchronize()
+               ctx.synchronize()
                del probe_d, norm_const, plan
-            pycuda.autoinit.context.synchronize()
+            ctx.synchronize()
             self.print_verbose('finished simulation phase #%d' % i)
             sim_t = time()-t
             self.print_verbose('Propagated %d probes in %2.4f s' % (self.probe_positions[phase].shape[0], sim_t))
@@ -717,36 +727,87 @@ class MSAGPU(MSAHybrid):
         #1. build probes
         probe_stack_func(psi_pos_d, psi_k_d, num_probes, np.float32(self.kmax), grid_steps_d, grid_range_d,
                          block=block_3d, grid=grid_3d, shared=0, stream=stream)
-        #pycuda.autoinit.context.synchronize()
+        #ctx.synchronize()
         cufft.cufftExecC2C(fft_plan_probe.handle, int(psi_pos_d), int(psi_pos_d), cufft.CUFFT_INVERSE)
-        #pycuda.autoinit.context.synchronize()
+        #ctx.synchronize()
         fftshift_func(psi_pos_d, block=block_3d, grid=grid_3d, shared=0, stream=stream)
-        #pycuda.autoinit.context.synchronize()
+        #ctx.synchronize()
         norm_const_func(psi_pos_d, norm_const_d, num_probes, block=block_1d, grid=grid_1d, stream=stream)
-        # pycuda.autoinit.context.synchronize()
+        # ctx.synchronize()
         normalize_func(psi_pos_d, norm_const_d, num_probes, block=block_3d, grid=grid_3d, stream=stream)
-        # pycuda.autoinit.context.synchronize()
+        # ctx.synchronize()
 
 
         # 2. Propagate probes through atomic potential
-        # pycuda.autoinit.context.synchronize()
+        # ctx.synchronize()
         for i in range(self.num_slices):
             self.print_debug('Atomic potential slice #%d' % i)
             multwise_stack_func.prepared_async_call(grid_3d, block_3d, stream, psi_pos_d, pot_slices_d[i], num_probes,
                                                     np.float32(1 / (np.prod(self.sampling))))
-            #pycuda.autoinit.context.synchronize()
+            #ctx.synchronize()
             cufft.cufftExecC2C(fft_plan_probe.handle, int(psi_pos_d), int(psi_pos_d), cufft.CUFFT_FORWARD)
-            #pycuda.autoinit.context.synchronize()
+            #ctx.synchronize()
             multwise_stack_func.prepared_async_call(grid_3d, block_3d, stream, psi_pos_d, propag_d, num_probes,
                                                     np.float32(1.0))
-            #pycuda.autoinit.context.synchronize()
+            #ctx.synchronize()
             cufft.cufftExecC2C(fft_plan_probe.handle, int(psi_pos_d), int(psi_pos_d), cufft.CUFFT_INVERSE)
-            #pycuda.autoinit.context.synchronize()
+            #ctx.synchronize()
 
         multwise_stack_func.prepared_async_call(grid_3d, block_3d, stream, psi_pos_d, ones_d, num_probes,
                                                 np.float32(1 / (np.prod(self.sampling))))
         cufft.cufftExecC2C(fft_plan_probe.handle, int(psi_pos_d), int(psi_pos_d), cufft.CUFFT_FORWARD)
         multwise_stack_func.prepared_async_call(grid_3d, block_3d, stream, psi_pos_d, ones_d, num_probes,
                                                 np.float32(np.sqrt(np.prod(self.sampling))))
-        #pycuda.autoinit.context.synchronize()
+        #ctx.synchronize()
         cuda.memcpy_dtoh_async(psi_x_pos_pin, psi_pos_d, stream=stream)
+
+
+class MSAMPI(MSAGPU):
+    def __init__(self, *args, **kwargs):
+        global comm
+        comm = MPI.COMM_WORLD
+        self.size = comm.Get_size()
+        self.rank = comm.Get_rank()
+        super(MSAMPI, self).__init__(*args, **kwargs)
+
+    def print_rank(self, *args, **kwargs):
+        if self.rank == 0:
+            print(*args, **kwargs)
+    def print_verbose(self, *args, **kwargs):
+        if self.verbose:
+            self.print_rank(*args, **kwargs)
+
+    def print_debug(self, *args, **kwargs):
+        if self.debug:
+            self.print_rank(*args, **kwargs)
+
+    def generate_probe_positions(self, *args, **kwargs):
+        super(MSAMPI, self).generate_probe_positions(*args, **kwargs)
+        data_parts = []
+        part = self.probe_positions.shape[0] // self.size
+        for rank in range(self.size):
+            slice_obj = slice(rank * part, (rank + 1)* part)
+            if rank == self.size - 1:
+                slice_obj = slice( rank * part, None)
+            data_parts.append(slice_obj)
+        if self.rank == 0:
+            data = [self.probe_positions[part] for part in data_parts]
+            self.data_size = np.sum([dat.shape[0] for dat in data])
+        else:
+            data = None
+        data = comm.scatter(data, root=0)
+        self.probe_positions = data
+        print("rank %d: my # of probe_positions %d" % (self.rank,
+        self.probe_positions.shape[0]))
+        self.num_probes = np.int32(self.probe_positions.shape[0])
+
+    def multislice(self, *args, **kwargs):
+        super(MSAMPI, self).multislice(*args, **kwargs)
+        receive_buff = None
+        if self.rank == 0:
+            buff_shape = (self.size, (self.data_size//self.size + 1) * np.prod(self.sampling))
+            receive_buff = np.empty(buff_shape, dtype=np.complex64)
+        comm.Gather(self.probes.flatten(), receive_buff, root=0)
+        if self.rank == 0:
+            receive_buff = receive_buff.reshape(-1, self.sampling[0], self.sampling[1])
+            self.print_verbose('Gathered results of shape: %s' %format(receive_buff.shape))
