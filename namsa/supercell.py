@@ -251,13 +251,12 @@ class SupercellBuilder(object):
         DWs = []
         atomic_numbers = []
 
-        tau = np.array([np.mod(w_mat[:3][:, 3], 1) for w_mat in self.sym_ops])
-
         for site in self.sites:
-            site_pos = np.array([site['frac_x'], site['frac_y'], site['frac_z']])
-            sym_pos = tau + site_pos
+            site_pos = np.array([site['frac_x'], site['frac_y'], site['frac_z'], 1])
+            sym_pos = np.array([ np.dot(sym_op, site_pos)[:3] for sym_op in self.sym_ops ])
             sym_pos -= sym_pos // 1
-            uc_positions = np.unique(sym_pos, return_index=False, axis=0)
+            _, uniq_indx = np.unique(np.round(sym_pos, 2),return_index=True, axis=0)
+            uc_positions = sym_pos[uniq_indx]
             xyz_positions = np.dot(self.basis, uc_positions.T).T
             cell_positions.append(uc_positions)
             xyz_cell_positions.append(xyz_positions)
@@ -375,14 +374,13 @@ class SupercellBuilder(object):
         self.print_debug('orthonormal basis:\n', np.round(basis_orthogonal.T, 4))
 
         # Project orthonormal lattice basis on the projection directions
-        b_out_orthogonal = np.array([b * vec for b, vec in zip(projec_1, basis_orthonormal.T)]).sum(0)
+        b_out_orthogonal = np.array([projec_1 * vec for vec in basis_orthogonal.T)]).sum(0)
         b_out_orthonormal = b_out_orthogonal / np.linalg.norm(b_out_orthogonal)
-        c_out_orthogonal = np.array([c * vec for c, vec in zip(projec_2, basis_orthonormal.T)]).sum(0)
+        c_out_orthogonal = np.array([projec_2 * vec for vec in basis_orthogonal.T)]).sum(0)
         c_out_orthonormal = c_out_orthogonal / np.linalg.norm(c_out_orthogonal)
         a_out_orthonormal = np.cross(b_out_orthonormal, c_out_orthonormal)
         self.print_debug('projected basis:\n%s' %format(np.round(np.array([a_out_orthonormal,b_out_orthonormal,
                                                                            c_out_orthonormal]),4)))
-
         # Orthogonality Check
         check = np.round(np.dot(b_out_orthonormal, c_out_orthonormal), 5)
         if check != 0.0:
@@ -432,7 +430,7 @@ class SupercellBuilder(object):
         t_vec = np.column_stack([t_a, t_b, t_c])
         bnorm = np.linalg.norm(basis_orthogonal, axis=0)
         supercell_sites = []
-        for site in self.sites:
+        for site in self.unit_cell_positions:
             old_pos = np.array([site['frac_x'], site['frac_y'], site['frac_z']])
             new_pos = np.dot(trans_mat, old_pos * bnorm)
             col_x = np.linspace(min_range[0], max_range[0], num=repeats[0] + 1)
@@ -464,6 +462,3 @@ class SupercellBuilder(object):
         if XYZ is not None:
             self.to_XYZ(XYZ, supercell=True)
             self.print_verbose('saving XYZ file %s' % XYZ)
-
-
-
