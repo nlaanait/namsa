@@ -11,14 +11,14 @@ comm_size = comm.Get_size()
 comm_rank = comm.Get_rank()
 
 def run(step=2.5, gpu_rank=0):
-    
+    # Build supercell 
     sp = SupercellBuilder('XYZ_files/Si.cif', verbose=False, debug=False)
     z_dir = np.array([1,1,1])
     y_dir = np.array([1,0,0])
-    #sp.transform_unit_cell()
     sp.build_unit_cell()
     sp.make_orthogonal_supercell(supercell_size=np.array([4*34.6,4*34.6,489.0]),
                              projec_1=y_dir, projec_2=z_dir)
+    # setup scattering simulations
     en = 100 # keV
     semi_angle= 4e-3 # radians
     max_ang = 200e-3
@@ -26,6 +26,7 @@ def run(step=2.5, gpu_rank=0):
                  verbose=True, debug=False)
     msa.setup_device(gpu_rank=gpu_rank)
     t = time()
+    # simulate
     msa.calc_atomic_potentials()
     slice_thickness = 2.0 #
     msa.build_potential_slices(slice_thickness)
