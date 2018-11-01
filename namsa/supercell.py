@@ -374,9 +374,9 @@ class SupercellBuilder(object):
         self.print_debug('orthonormal basis:\n', np.round(basis_orthogonal.T, 4))
 
         # Project orthonormal lattice basis on the projection directions
-        b_out_orthogonal = np.array([projec_1 * vec for vec in basis_orthogonal.T)]).sum(0)
+        b_out_orthogonal = np.array([projec_1 * vec for vec in basis_orthogonal.T]).sum(0)
         b_out_orthonormal = b_out_orthogonal / np.linalg.norm(b_out_orthogonal)
-        c_out_orthogonal = np.array([projec_2 * vec for vec in basis_orthogonal.T)]).sum(0)
+        c_out_orthogonal = np.array([projec_2 * vec for vec in basis_orthogonal.T]).sum(0)
         c_out_orthonormal = c_out_orthogonal / np.linalg.norm(c_out_orthogonal)
         a_out_orthonormal = np.cross(b_out_orthonormal, c_out_orthonormal)
         self.print_debug('projected basis:\n%s' %format(np.round(np.array([a_out_orthonormal,b_out_orthonormal,
