@@ -15,6 +15,7 @@ import pycuda.driver as cuda
 import skcuda.fft as skfft
 import skcuda.cufft as cufft
 from time import time
+import h5py
 from mpi4py import MPI
 
 
@@ -802,12 +803,27 @@ class MSAMPI(MSAGPU):
         self.num_probes = np.int32(self.probe_positions.shape[0])
 
     def multislice(self, *args, **kwargs):
+        try:
+            h5_write= kwargs.pop('h5_write')
+        except KeyError:
+            h5_write = False
         super(MSAMPI, self).multislice(*args, **kwargs)
-        receive_buff = None
-        if self.rank == 0:
-            buff_shape = (self.size, (self.data_size//self.size + 1) * np.prod(self.sampling))
-            receive_buff = np.empty(buff_shape, dtype=np.complex64)
-        comm.Gather(self.probes.flatten(), receive_buff, root=0)
-        if self.rank == 0:
-            receive_buff = receive_buff.reshape(-1, self.sampling[0], self.sampling[1])
-            self.print_verbose('Gathered results of shape: %s' %format(receive_buff.shape))
+        if h5_write:
+            try:
+                with h5py.File('output.h5',mode='w', driver='mpio', comm=MPI.COMM_WORLD) as f:
+                    dset = f.create_dataset('picoCBED', (self.size, self.probe_positions.shape[0],
+                                        self.sampling[0], self.sampling[1]), dtype=np.complex64)
+                    dset[self.rank] = self.probes
+                #f.close()
+                self.print_rank('finished writing h5 file.')
+            except:
+                self.print_rank('something went wrong with h5 file.')
+        else:
+            receive_buff = None
+            if self.rank == 0:
+                buff_shape = (self.size, (self.data_size//self.size + 1) * np.prod(self.sampling))
+                receive_buff = np.empty(buff_shape, dtype=np.complex64)
+            comm.Gather(self.probes.flatten(), receive_buff, root=0)
+            if self.rank == 0:
+                receive_buff = receive_buff.reshape(-1, self.sampling[0], self.sampling[1])
+                self.print_verbose('Gathered results of shape: %s' %format(receive_buff.shape))
