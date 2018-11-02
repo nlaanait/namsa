@@ -806,6 +806,7 @@ class MSAMPI(MSAGPU):
         super(MSAMPI, self).generate_probe_positions(*args, **kwargs)
         data_parts = []
         part = self.probe_positions.shape[0] // self.size
+        self.total_num_probes = self.probe_positions.shape[0]
         for rank in range(self.size):
             slice_obj = slice(rank * part, (rank + 1)* part)
             if rank == self.size - 1:
@@ -835,16 +836,19 @@ class MSAMPI(MSAGPU):
             # # TODO: Max size with MPI+HDF5 is 2 GB, see:https://support.hdfgroup.org/HDF5/faq/limits.html need to drain data in chunks
             # or break up into h5files.
             # try:
-                #with h5py.File('output.h5',mode='w', driver='mpio', comm=MPI.COMM_WORLD) as f:
+            # with h5py.File('output.h5',mode='w', driver='mpio', comm=MPI.COMM_WORLD) as h5_file:
                     # dset = f.create_dataset('picoCBED', (self.size, self.probe_positions.shape[0],
                                        # self.sampling[0], self.sampling[1]), dtype=np.complex64)
                     # dset[:] = self.probes
             # except:
                 # self.print_rank('something went wrong with h5 file.')
             # dset = h5_file.create_dataset('picoCBED_%d' %self.rank, data=self.probes, dtype=np.complex64)
-            dset = h5_file.create_dataset('4D_CBED', (self.size, self.data_size//self.size + 1,
+            dset = h5_file.create_dataset('4D_CBED', (self.size, self.total_num_probes,
                                 self.sampling[0], self.sampling[1]), dtype=np.complex64)
-            dset[self.rank][self.data_parts[self.rank]] = self.probe_positions
+            # print(self.data_parts[self.rank])
+            # print(dset[self.rank, self.data_parts[self.rank]].shape)
+            # print(self.probes.shape)
+            dset[self.rank, self.data_parts[self.rank]] = self.probes
             self.print_rank('finished writing h5 file.')
         else:
             receive_buff = None
