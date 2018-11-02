@@ -770,6 +770,26 @@ class MSAMPI(MSAGPU):
         self.size = comm.Get_size()
         self.rank = comm.Get_rank()
         super(MSAMPI, self).__init__(*args, **kwargs)
+        #atexit.register(MPI.Finalize)
+
+    # def setup_device(self, gpu_rank=0):
+    #     global ctx
+    #     cuda.init()
+    #     dev = cuda.Device(gpu_rank)
+    #     ctx = dev.make_context()
+    #     # ctx.attach()
+    #     self.gpu_rank = gpu_rank
+    #
+    #     import atexit
+    #     def _clean_up():
+    #         global ctx
+    #         ctx.pop()
+    #         ctx = None
+    #         from pycuda.tools import clear_context_caches
+    #         clear_context_caches()
+    #
+    #     atexit.register(_clean_up)
+    #     atexit.register(MPI.Finalize)
 
     def print_rank(self, *args, **kwargs):
         if self.rank == 0:
@@ -791,6 +811,7 @@ class MSAMPI(MSAGPU):
             if rank == self.size - 1:
                 slice_obj = slice( rank * part, None)
             data_parts.append(slice_obj)
+        self.data_parts = data_parts
         if self.rank == 0:
             data = [self.probe_positions[part] for part in data_parts]
             self.data_size = np.sum([dat.shape[0] for dat in data])
@@ -804,20 +825,27 @@ class MSAMPI(MSAGPU):
 
     def multislice(self, *args, **kwargs):
         try:
-            h5_write= kwargs.pop('h5_write')
+            # h5_write= kwargs.pop('h5_write')
+            h5_file = kwargs.pop('h5_write')
+            h5_write = isinstance(h5_file, h5py.File)
         except KeyError:
             h5_write = False
         super(MSAMPI, self).multislice(*args, **kwargs)
         if h5_write:
-            try:
-                with h5py.File('output.h5',mode='w', driver='mpio', comm=MPI.COMM_WORLD) as f:
-                    dset = f.create_dataset('picoCBED', (self.size, self.probe_positions.shape[0],
-                                        self.sampling[0], self.sampling[1]), dtype=np.complex64)
-                    dset[self.rank] = self.probes
-                #f.close()
-                self.print_rank('finished writing h5 file.')
-            except:
-                self.print_rank('something went wrong with h5 file.')
+            # # TODO: Max size with MPI+HDF5 is 2 GB, see:https://support.hdfgroup.org/HDF5/faq/limits.html need to drain data in chunks
+            # or break up into h5files.
+            # try:
+                #with h5py.File('output.h5',mode='w', driver='mpio', comm=MPI.COMM_WORLD) as f:
+                    # dset = f.create_dataset('picoCBED', (self.size, self.probe_positions.shape[0],
+                                       # self.sampling[0], self.sampling[1]), dtype=np.complex64)
+                    # dset[:] = self.probes
+            # except:
+                # self.print_rank('something went wrong with h5 file.')
+            # dset = h5_file.create_dataset('picoCBED_%d' %self.rank, data=self.probes, dtype=np.complex64)
+            dset = h5_file.create_dataset('4D_CBED', (self.size, self.data_size//self.size + 1,
+                                self.sampling[0], self.sampling[1]), dtype=np.complex64)
+            dset[self.rank][self.data_parts[self.rank]] = self.probe_positions
+            self.print_rank('finished writing h5 file.')
         else:
             receive_buff = None
             if self.rank == 0:
