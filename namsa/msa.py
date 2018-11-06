@@ -794,13 +794,14 @@ class MSAMPI(MSAGPU):
     def print_rank(self, *args, **kwargs):
         if self.rank == 0:
             print(*args, **kwargs)
+
     def print_verbose(self, *args, **kwargs):
         if self.verbose:
             self.print_rank(*args, **kwargs)
 
-    def print_debug(self, *args, **kwargs):
-        if self.debug:
-            self.print_rank(*args, **kwargs)
+    # def print_debug(self, *args, **kwargs):
+    #     if self.debug:
+    #         self.print_rank(*args, **kwargs)
 
     def generate_probe_positions(self, *args, **kwargs):
         super(MSAMPI, self).generate_probe_positions(*args, **kwargs)
@@ -835,27 +836,16 @@ class MSAMPI(MSAGPU):
         if h5_write:
             # # TODO: Max size with MPI+HDF5 is 2 GB, see:https://support.hdfgroup.org/HDF5/faq/limits.html need to drain data in chunks
             # or break up into h5files.
-            # try:
-            # with h5py.File('output.h5',mode='w', driver='mpio', comm=MPI.COMM_WORLD) as h5_file:
-                    # dset = f.create_dataset('picoCBED', (self.size, self.probe_positions.shape[0],
-                                       # self.sampling[0], self.sampling[1]), dtype=np.complex64)
-                    # dset[:] = self.probes
-            # except:
-                # self.print_rank('something went wrong with h5 file.')
-            # dset = h5_file.create_dataset('picoCBED_%d' %self.rank, data=self.probes, dtype=np.complex64)
             dset = h5_file.create_dataset('4D_CBED', (self.size, self.total_num_probes,
                                 self.sampling[0], self.sampling[1]), dtype=np.complex64)
-            # print(self.data_parts[self.rank])
-            # print(dset[self.rank, self.data_parts[self.rank]].shape)
-            # print(self.probes.shape)
             dset[self.rank, self.data_parts[self.rank]] = self.probes
             self.print_rank('finished writing h5 file.')
         else:
             receive_buff = None
+            self.print_debug('rank %d: shape of calculated probes = %s' %(self.rank, format(self.probes.shape)))
             if self.rank == 0:
-                buff_shape = (self.size, (self.data_size//self.size + 1) * np.prod(self.sampling))
+                buff_shape = (self.size, self.total_num_probes, self.sampling[0], self.sampling[1])
+                self.print_rank('receive buffer shape: %s' %format(buff_shape))
                 receive_buff = np.empty(buff_shape, dtype=np.complex64)
-            comm.Gather(self.probes.flatten(), receive_buff, root=0)
-            if self.rank == 0:
-                receive_buff = receive_buff.reshape(-1, self.sampling[0], self.sampling[1])
-                self.print_verbose('Gathered results of shape: %s' %format(receive_buff.shape))
+            comm.Gather(self.probes, receive_buff, root=0)
+            if self.rank == 0: self.print_rank('Gathered results of shape: %s' %format(receive_buff.shape))
