@@ -844,8 +844,29 @@ class MSAMPI(MSAGPU):
             receive_buff = None
             self.print_debug('rank %d: shape of calculated probes = %s' %(self.rank, format(self.probes.shape)))
             if self.rank == 0:
-                buff_shape = (self.size, self.total_num_probes, self.sampling[0], self.sampling[1])
+                buff_shape = (self.total_num_probes, self.sampling[0], self.sampling[1])
                 self.print_rank('receive buffer shape: %s' %format(buff_shape))
                 receive_buff = np.empty(buff_shape, dtype=np.complex64)
-            comm.Gather(self.probes, receive_buff, root=0)
+            # Calculate buffer size for a vector gather op
+            count = []
+            for data_part in self.data_parts:
+                start = data_part.start
+                if start is None:
+                    start = 0
+                stop = data_part.stop
+                if stop is None:
+                    stop = self.total_num_probes
+                count.append(stop - start)
+            count = np.array(count)
+            displ = np.cumsum(count)
+            displ = np.append(displ[::-1],0)[::-1]
+            xy_offset = np.prod(self.sampling)
+            count *= xy_offset
+            count = count.astype(np.int64)
+            displ *= xy_offset
+            displ = displ.astype(np.int64)
+            self.print_debug("rank %d: my # probes: %s, count: %d, displ: %d" %(self.rank, format(self.probes.shape), count[self.rank], displ[self.rank]))
+            # gather
+            comm.Gatherv(self.probes, [receive_buff, count, displ[:-1], MPI.C_FLOAT_COMPLEX], root=0)
+
             if self.rank == 0: self.print_rank('Gathered results of shape: %s' %format(receive_buff.shape))
