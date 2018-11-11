@@ -6,10 +6,12 @@ from time import time
 import sys
 import h5py
 from mpi4py import MPI
+import os
 
 comm = MPI.COMM_WORLD
 comm_size = comm.Get_size()
 comm_rank = comm.Get_rank()
+comm_local_rank = int(os.environ.get('OMPI_COMM_WORLD_LOCAL_RANK'))
 
 def run(h5_file= None, step=2.5, gpu_rank=0):
     
@@ -55,9 +57,9 @@ if __name__ == '__main__':
         if write:
             with h5py.File('output.h5', driver='mpio', mode='w', comm=MPI.COMM_WORLD, libver='latest') as f:
                 f.atomic = False
-                run(h5_file=f, step=step, gpu_rank=comm_rank)
+                run(h5_file=f, step=step, gpu_rank=comm_local_rank)
                 sys.exit()
         else:
-            run(step=step, gpu_rank=comm_rank)
+            run(step=step, gpu_rank=comm_local_rank)
     else :
-        run(step=2.5, gpu_rank=comm_rank)
+        run(step=2.5, gpu_rank=comm_local_rank)

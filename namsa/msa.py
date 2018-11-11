@@ -836,9 +836,11 @@ class MSAMPI(MSAGPU):
         if h5_write:
             # # TODO: Max size with MPI+HDF5 is 2 GB, see:https://support.hdfgroup.org/HDF5/faq/limits.html need to drain data in chunks
             # or break up into h5files.
-            dset = h5_file.create_dataset('4D_CBED', (self.size, self.total_num_probes,
+            dset = h5_file.create_dataset('4D_CBED', (self.total_num_probes,
                                 self.sampling[0], self.sampling[1]), dtype=np.complex64)
-            dset[self.rank, self.data_parts[self.rank]] = self.probes
+            # Workaround the large parallel I/O limitation
+            for i, p in enumerate(range(*self.data_parts[self.rank].indices(self.total_num_probes))):
+                dset[p, :, :] = self.probes[i, :, :]
             self.print_rank('finished writing h5 file.')
         else:
             receive_buff = None
