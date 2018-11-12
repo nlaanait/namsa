@@ -837,6 +837,7 @@ class MSAMPI(MSAGPU):
             dset = h5_file.create_dataset('4D_CBED', (self.total_num_probes,
                                 self.sampling[0], self.sampling[1]), dtype=np.complex64)
             # Workaround the large parallel I/O limitation
+            ### TODO: (low priority) test if doing below in chunks over indices < 2GB speeds up the writing.
             for i, p in enumerate(range(*self.data_parts[self.rank].indices(self.total_num_probes))):
                 dset[p, :, :] = self.probes[i, :, :]
             self.print_rank('finished writing h5 file.')
