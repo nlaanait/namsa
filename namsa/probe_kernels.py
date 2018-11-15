@@ -30,3 +30,4 @@ class ProbeKernels(object):
         self.kernels['propagator'] = src.get_function('propagator')
         self.kernels['norm_const'] = src.get_function('norm_const')
         self.kernels['normalize'] = src.get_function('normalize')
+        self.kernels['mod_square_stack'] = src.get_function('mod_square_stack')

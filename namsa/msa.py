@@ -87,7 +87,8 @@ class MSA(object):
             self.max_ang = max_angle
             self.kmax = self.max_ang / self.Lambda
             self.sampling = np.floor(self.kmax * self.dims[:2]).astype(np.int)
-        self.pix_size = self.dims[:2] / self.sampling
+            self.sampling = self.sampling[::-1]
+        self.pix_size = self.dims[:2][::-1] / self.sampling
         self.kpix_size = self.kmax/self.sampling
         self.sigma = sigma_int(self.E*1e3)
         self.print_verbose('Simulation Parameters:\nSupercell dimensions xyz:%s (Å)\nReal, Reciprocal space pixel sizes:%s Å, %s 1/Å'
@@ -456,9 +457,7 @@ class MSAGPU(MSAHybrid):
             raise cuda.CompileError
 
     def build_probe(self, probe_dict={'smooth_apert': True, 'apert_smooth': 50, 'spherical_phase': True,
-                                      'aberration_dict': {'C1': 0., 'C3': 0., 'C5': 0.},'scherzer': True}
-                    ):
-
+                                      'aberration_dict': {'C1': 0., 'C3': 0., 'C5': 0.},'scherzer': True}):
         # load kernels and prepare func args
         self._load_kernels()
         aber_dict = probe_dict['aberration_dict']
@@ -511,8 +510,8 @@ class MSAGPU(MSAHybrid):
         # build probe in x-space
         fft_plan = skfft.Plan(self.psi_k.shape, np.complex64, np.complex64, batch=1)
         cufft.cufftExecC2C(fft_plan.handle, int(psi_k_d), int(psi_x_d), cufft.CUFFT_INVERSE)
-        #ctx.synchronize()
-        fftshift_func(psi_x_d, shape_x, shape_y, block=block, grid=grid)
+        ctx.synchronize()
+        fftshift_func(psi_x_d, shape_y, block=block, grid=grid)
         #ctx.synchronize()
         cuda.memcpy_dtoh_async(self.psi, psi_x_d, cuda.Stream())
         self.psi /= np.sqrt(np.sum(np.abs(self.psi)**2))
@@ -546,9 +545,9 @@ class MSAGPU(MSAHybrid):
             blk_zsize = 1
             blk_xsize = 32
             blk_ysize = 32
-            grid_xsize = int((shape_x + blk_xsize - 1) / blk_xsize)
-            grid_ysize = int((shape_y + blk_ysize - 1) / blk_ysize)
-            grid_zsize = int((shape_z + blk_zsize - 1) / blk_zsize)
+            grid_xsize = int(round((shape_x + blk_xsize - 1) / blk_xsize))
+            grid_ysize = int(round((shape_y + blk_ysize - 1) / blk_ysize))
+            grid_zsize = int(round((shape_z + blk_zsize - 1) / blk_zsize))
             block_3d = (blk_xsize, blk_ysize, blk_zsize)
             grid_3d = (grid_xsize, grid_ysize, grid_zsize)
             return block_3d, grid_3d
@@ -556,7 +555,7 @@ class MSAGPU(MSAHybrid):
             shape_x = shapes[0]
             shape_y = shapes[1]
             block_2d = (32, 32, 1)
-            grid_2d = (int((shape_x + block_2d[0] - 1) / 32), int((shape_y + block_2d[1] - 1) / 32), 1)
+            grid_2d = (int(round((shape_x + block_2d[0] - 1) / 32)), int(round((shape_y + block_2d[1] - 1) / 32)), 1)
             return block_2d, grid_2d
         if mode == '1D':
             shape_x = shapes[0]
@@ -675,7 +674,7 @@ class MSAGPU(MSAHybrid):
                 if num_probes == 0: break
                 probes_d.append(cuda.mem_alloc(int(num_probes*np.prod(self.sampling)*8)))
                 plans.append(skfft.Plan(self.sampling, np.complex64, np.complex64, batch=num_probes, stream=stream))
-                norm_consts.append(cuda.mem_alloc(np.empty_like(num_probes,dtype=np.float32).nbytes))
+                norm_consts.append(cuda.mem_alloc(np.empty(num_probes,dtype=np.float32).nbytes))
         # 3. Propagate Beams
             for batch, stream, probe_d, plan,  norm_const in zip(batches, streams, probes_d, plans, norm_consts):
                 num_probes = np.int32(self.probe_positions[phase][batch].shape[0])
@@ -692,6 +691,7 @@ class MSAGPU(MSAHybrid):
                del probe_d, norm_const, plan
             ctx.synchronize()
             self.print_verbose('finished simulation phase #%d' % i)
+            self.probes = self.probes.astype(np.float32) # discard imaginary
             sim_t = time()-t
             self.print_verbose('Propagated %d probes in %2.4f s' % (self.probe_positions[phase].shape[0], sim_t))
 
@@ -724,6 +724,7 @@ class MSAGPU(MSAHybrid):
         fftshift_func = self.kernels['fftshift_2d_stack']
         norm_const_func = self.kernels['norm_const']
         normalize_func = self.kernels['normalize']
+        mod_square_func = self.kernels['mod_square_stack']
 
         #1. build probes
         probe_stack_func(psi_pos_d, psi_k_d, num_probes, np.float32(self.kmax), grid_steps_d, grid_range_d,
@@ -731,20 +732,23 @@ class MSAGPU(MSAHybrid):
         #ctx.synchronize()
         cufft.cufftExecC2C(fft_plan_probe.handle, int(psi_pos_d), int(psi_pos_d), cufft.CUFFT_INVERSE)
         #ctx.synchronize()
-        fftshift_func(psi_pos_d, block=block_3d, grid=grid_3d, shared=0, stream=stream)
+        fftshift_func(psi_pos_d, num_probes, block=block_3d, grid=grid_3d, shared=0, stream=stream)
         #ctx.synchronize()
         norm_const_func(psi_pos_d, norm_const_d, num_probes, block=block_1d, grid=grid_1d, stream=stream)
-        # ctx.synchronize()
+        # # ctx.synchronize()
+        ### TODO: Check why normalization is off by 1e-3.
+        self.norm = np.empty(num_probes,dtype=np.float32)
+        cuda.memcpy_dtoh_async(self.norm, norm_const_d, stream=stream)
         normalize_func(psi_pos_d, norm_const_d, num_probes, block=block_3d, grid=grid_3d, stream=stream)
-        # ctx.synchronize()
+        ctx.synchronize()
 
 
         # 2. Propagate probes through atomic potential
-        # ctx.synchronize()
+        ctx.synchronize()
         for i in range(self.num_slices):
             self.print_debug('Atomic potential slice #%d' % i)
             multwise_stack_func.prepared_async_call(grid_3d, block_3d, stream, psi_pos_d, pot_slices_d[i], num_probes,
-                                                    np.float32(1 / (np.prod(self.sampling))))
+                                                    np.float32(1/np.prod(self.sampling)))
             #ctx.synchronize()
             cufft.cufftExecC2C(fft_plan_probe.handle, int(psi_pos_d), int(psi_pos_d), cufft.CUFFT_FORWARD)
             #ctx.synchronize()
@@ -759,7 +763,8 @@ class MSAGPU(MSAHybrid):
         cufft.cufftExecC2C(fft_plan_probe.handle, int(psi_pos_d), int(psi_pos_d), cufft.CUFFT_FORWARD)
         multwise_stack_func.prepared_async_call(grid_3d, block_3d, stream, psi_pos_d, ones_d, num_probes,
                                                 np.float32(np.sqrt(np.prod(self.sampling))))
-        #ctx.synchronize()
+        mod_square_func(psi_pos_d, num_probes, block=block_3d, grid=grid_3d, stream=stream)
+        ctx.synchronize()
         cuda.memcpy_dtoh_async(psi_x_pos_pin, psi_pos_d, stream=stream)
 
 
@@ -770,26 +775,6 @@ class MSAMPI(MSAGPU):
         self.size = comm.Get_size()
         self.rank = comm.Get_rank()
         super(MSAMPI, self).__init__(*args, **kwargs)
-        #atexit.register(MPI.Finalize)
-
-    # def setup_device(self, gpu_rank=0):
-    #     global ctx
-    #     cuda.init()
-    #     dev = cuda.Device(gpu_rank)
-    #     ctx = dev.make_context()
-    #     # ctx.attach()
-    #     self.gpu_rank = gpu_rank
-    #
-    #     import atexit
-    #     def _clean_up():
-    #         global ctx
-    #         ctx.pop()
-    #         ctx = None
-    #         from pycuda.tools import clear_context_caches
-    #         clear_context_caches()
-    #
-    #     atexit.register(_clean_up)
-    #     atexit.register(MPI.Finalize)
 
     def print_rank(self, *args, **kwargs):
         if self.rank == 0:
@@ -798,10 +783,6 @@ class MSAMPI(MSAGPU):
     def print_verbose(self, *args, **kwargs):
         if self.verbose:
             self.print_rank(*args, **kwargs)
-
-    # def print_debug(self, *args, **kwargs):
-    #     if self.debug:
-    #         self.print_rank(*args, **kwargs)
 
     def generate_probe_positions(self, *args, **kwargs):
         super(MSAMPI, self).generate_probe_positions(*args, **kwargs)
@@ -835,7 +816,7 @@ class MSAMPI(MSAGPU):
         super(MSAMPI, self).multislice(*args, **kwargs)
         if h5_write:
             dset = h5_file.create_dataset('4D_CBED', (self.total_num_probes,
-                                self.sampling[0], self.sampling[1]), dtype=np.complex64)
+                                self.sampling[0], self.sampling[1]), dtype=self.probes.dtype)
             # Workaround the large parallel I/O limitation
             ### TODO: (low priority) test if doing below in chunks over indices < 2GB speeds up the writing.
             for i, p in enumerate(range(*self.data_parts[self.rank].indices(self.total_num_probes))):
@@ -847,7 +828,7 @@ class MSAMPI(MSAGPU):
             if self.rank == 0:
                 buff_shape = (self.total_num_probes, self.sampling[0], self.sampling[1])
                 self.print_rank('receive buffer shape: %s' %format(buff_shape))
-                receive_buff = np.empty(buff_shape, dtype=np.complex64)
+                receive_buff = np.empty(buff_shape, dtype=self.probes.dtype)
             # Calculate buffer size for a vector gather op
             count = []
             for data_part in self.data_parts:
@@ -868,6 +849,8 @@ class MSAMPI(MSAGPU):
             displ = displ.astype(np.int64)
             self.print_debug("rank %d: my # probes: %s, count: %d, displ: %d" %(self.rank, format(self.probes.shape), count[self.rank], displ[self.rank]))
             # gather
-            comm.Gatherv(self.probes, [receive_buff, count, displ[:-1], MPI.C_FLOAT_COMPLEX], root=0)
+            # comm.Gatherv(self.probes, [receive_buff, count, displ[:-1], MPI.C_FLOAT_COMPLEX], root=0)
+            comm.Gatherv(self.probes, [receive_buff, count, displ[:-1], MPI.FLOAT], root=0)
+
 
             if self.rank == 0: self.print_rank('Gathered results of shape: %s' %format(receive_buff.shape))

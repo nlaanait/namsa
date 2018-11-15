@@ -54,7 +54,7 @@ __global__ void norm_const(pycuda::complex<float> arr[][{{x_sampling}} * {{y_sam
   }
 }
 
-__global__ void normalize(pycuda::complex<float> arr[][{{x_sampling}}][{{y_sampling}}], float *norm, int size_z){
+__global__ void normalize(pycuda::complex<float> arr[][{{y_sampling}}][{{x_sampling}}], float *norm, int size_z){
     int stk_idx = blockIdx.z * blockDim.z + threadIdx.z;
     int row_idx = blockIdx.y * blockDim.y + threadIdx.y;
     int col_idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -96,6 +96,16 @@ __global__ void mult_wise_c3d_c2d (pycuda::complex<float> arr_3d[][{{y_sampling}
     }
 }
 
+__global__ void mod_square_stack(pycuda::complex<float> arr_3d[][{{y_sampling}}][{{x_sampling}}], int z_size){
+    int row_idx = blockDim.y * blockIdx.y + threadIdx.y;
+    int col_idx = blockDim.x * blockIdx.x + threadIdx.x;
+    int stk_idx = blockDim.z * blockIdx.z + threadIdx.z;
+    if (row_idx < {{y_sampling}} && col_idx < {{x_sampling}} && stk_idx < z_size)
+    {
+      arr_3d[stk_idx][row_idx][col_idx] = pycuda::norm(arr_3d[stk_idx][row_idx][col_idx]);
+    }
+}
+
 __global__ void propagator(pycuda::complex<float> *arr, float k_max, float t_slice,float Lambda, int size_x, int size_y){
     const double pi = acos(-1.0);
     int row_idx =  blockDim.y * blockIdx.y + threadIdx.y;
@@ -114,7 +124,7 @@ __global__ void hard_aperture(float *arr, float k_max, float k_semi, int size_x,
     int col_idx =  blockDim.x * blockIdx.x + threadIdx.x;
     int idx = row_idx * size_x  + col_idx;
     float k_rad = calc_krad(k_max, size_x, size_y, col_idx, row_idx);
-    if (row_idx < size_x && col_idx < size_y)
+    if (row_idx < size_y && col_idx < size_x)
     {
         if ( k_rad  < k_semi ){
             arr[idx] = 1.f;
@@ -167,86 +177,53 @@ __global__ void build_probes_stack(pycuda::complex<float> psi_pos[][{{y_sampling
     }
 }
 
-__global__ void fftshift_2d(pycuda::complex<float> *arr, int size_x, int size_y){
-    // 2D Slice & 1D Line
-    int sLine = size_x;
-    int sSlice = size_x * size_y;
 
-    // Transformations Equations
-    int sEq1 = (sSlice + sLine) / 2;
-    int sEq2 = (sSlice - sLine) / 2;
+__global__ void fftshift_2d(pycuda::complex<float> arr[][{{x_sampling}}], int size_y){
 
    int row_idx = blockDim.y * blockIdx.y + threadIdx.y;
    int col_idx = blockDim.x * blockIdx.x + threadIdx.x;
-   int idx = row_idx * size_x  + col_idx;
    pycuda::complex<float> temp = pycuda::complex<float>(0.,0.);
-   if (col_idx < size_x / 2)
+   int bd_y = rintf(floorf(size_y * 1.f / 2));
+   int bd_x = rintf(floorf({{x_sampling}} * 1.f  / 2));
+
+   if (row_idx <= bd_y && col_idx < bd_x && row_idx + bd_y < size_y)
     {
-        if (row_idx < size_y / 2)
-        {
-            temp = arr[idx];
-
-            // First Quad
-            arr[idx] = arr[idx + sEq1];
-
-            // Third Quad
-            arr[idx + sEq1] = temp;
-        }
+      temp = arr[row_idx][col_idx];
+      arr[row_idx][col_idx] = arr[row_idx + bd_y][col_idx + bd_x];
+      arr[row_idx + bd_y][col_idx + bd_x] = temp;
     }
-    else
+
+    if (row_idx <= bd_y && col_idx >= bd_x && col_idx < {{x_sampling}} && row_idx + bd_y < size_y)
     {
-        if (row_idx < size_y / 2)
-        {
-            temp = arr[idx];
-
-            // Second Quad
-            arr[idx] = arr[idx + sEq2];
-
-            // Fourth Quad
-            arr[idx + sEq2] = temp;
-        }
+      temp = arr[row_idx][col_idx];
+      arr[row_idx][col_idx] = arr[row_idx + bd_y][col_idx - bd_x];
+      arr[row_idx + bd_y][col_idx - bd_x] = temp;
     }
 }
 
-__global__ void fftshift_2d_stack(pycuda::complex<float> arr[][{{y_sampling}} * {{x_sampling}}])
-  {
-  // 2D Slice & 1D Line
-    int sLine = {{x_sampling}};
-    int sSlice = {{x_sampling}} * {{y_sampling}};
 
-    // Transformations Equations
-    int sEq1 = (sSlice + sLine) / 2;
-    int sEq2 = (sSlice - sLine) / 2;
+__global__ void fftshift_2d_stack(pycuda::complex<float> arr[][{{y_sampling}}][{{x_sampling}}], int size_z){
 
    int row_idx = blockDim.y * blockIdx.y + threadIdx.y;
    int col_idx = blockDim.x * blockIdx.x + threadIdx.x;
    int stk_idx = blockIdx.z * blockDim.z + threadIdx.z;
-   int idx = row_idx * {{x_sampling}}  + col_idx;
    pycuda::complex<float> temp = pycuda::complex<float>(0.,0.);
-   if (col_idx < {{x_sampling}} / 2)
-    {
-        if (row_idx < {{y_sampling}} / 2)
-        {
-            temp = arr[stk_idx][idx];
+   int bd_y = rintf(floorf({{y_sampling}} * 1.f / 2));
+   int bd_x = rintf(floorf({{x_sampling}} * 1.f / 2));
 
-            // First Quad
-            arr[stk_idx][idx] = arr[stk_idx][idx + sEq1];
+   if (stk_idx < size_z){
+      if (row_idx <= bd_y && col_idx < bd_x && row_idx + bd_y < {{y_sampling}})
+      {
+        temp = arr[stk_idx][row_idx][col_idx];
+        arr[stk_idx][row_idx][col_idx] = arr[stk_idx][row_idx + bd_y][col_idx + bd_x];
+        arr[stk_idx][row_idx + bd_y][col_idx + bd_x] = temp;
+      }
 
-            // Third Quad
-            arr[stk_idx][idx + sEq1] = temp;
-        }
-    }
-    else
-    {
-        if (row_idx < {{y_sampling}} / 2)
-        {
-            temp = arr[stk_idx][idx];
-
-            // Second Quad
-            arr[stk_idx][idx] = arr[stk_idx][idx + sEq2];
-
-            // Fourth Quad
-            arr[stk_idx][idx + sEq2] = temp;
-        }
-    }
+      if (row_idx <= bd_y && col_idx >= bd_x && col_idx < {{x_sampling}} && row_idx + bd_y < {{y_sampling}})
+      {
+        temp = arr[stk_idx][row_idx][col_idx];
+        arr[stk_idx][row_idx][col_idx] = arr[stk_idx][row_idx + bd_y][col_idx - bd_x];
+        arr[stk_idx][row_idx + bd_y][col_idx - bd_x] = temp;
+      }
+   }
 }
