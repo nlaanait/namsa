@@ -1,5 +1,4 @@
 from pycuda.tools import dtype_to_ctype
-# import pycuda.autoinit
 from pycuda.compiler import SourceModule
 from jinja2 import Template
 import numpy as np
@@ -31,3 +30,23 @@ class ProbeKernels(object):
         self.kernels['norm_const'] = src.get_function('norm_const')
         self.kernels['normalize'] = src.get_function('normalize')
         self.kernels['mod_square_stack'] = src.get_function('mod_square_stack')
+
+class PotentialKernels:
+    def __init__(self, cu_file=None, sampling=np.array([512,512]),
+    potential_shape=np.array([80,80]), num_slices=100, num_sites=10000, sites_size=1000):
+        if cu_file is None:
+            cu_file = os.path.join(namsa.__path__[0], 'potential_kernels.cu')
+        with open(cu_file, 'r') as f:
+            cuda_kerns = Template(f.read())
+        self.kernels = dict()
+        self.x_sampling = np.int32(sampling[1])
+        self.y_sampling = np.int32(sampling[0])
+        self.pot_shape_x = np.int32(potential_shape[1])
+        self.pot_shape_y = np.int32(potential_shape[0])
+        self.num_slices = np.int32(num_slices)
+        self.num_sites = np.int32(num_sites)
+        self.sites_size = np.int32(sites_size)
+        kernels = cuda_kerns.render(y_sampling= self.y_sampling, x_sampling=self.x_sampling,
+                               pot_shape_y=self.pot_shape_y, pot_shape_x=self.pot_shape_x, sites_size=self.sites_size)
+        src = SourceModule(kernels)
+        self.kernels['build_potential'] = src.get_function('BuildScatteringPotential')

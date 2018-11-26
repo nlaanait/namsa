@@ -1,4 +1,5 @@
 #include <pycuda-complex.hpp>
+#include <stdio.h>
 #define FULL_MASK 0xffffffff
 
 __inline__ __device__ int warpReduceSumSync(int val, int mask){
@@ -15,7 +16,7 @@ __device__ double calc_krad(float k_max, int size_x, int size_y, int col_idx, in
 }
 
 __device__ float phase_shift(float k_max, int size_x, int size_y, int col_idx, int row_idx, int stk_idx,
-      int *grid_step, float *grid_range){
+    int *grid_step, float *grid_range){
     const double pi = acos(-1.0);
     float kx = float(col_idx) * k_max/float(size_x - 1) - k_max/2.;
     float ky = float(row_idx) * k_max/float(size_y - 1) - k_max/2.;
@@ -96,6 +97,16 @@ __global__ void mult_wise_c3d_c2d (pycuda::complex<float> arr_3d[][{{y_sampling}
     }
 }
 
+__global__ void mult_wise_c3d_c3d_ind (pycuda::complex<float> arr_3d[][{{y_sampling}}][{{x_sampling}}],
+    pycuda::complex<float> arr_2d[][{{y_sampling}}][{{x_sampling}}], int z_size, int z_index, float scale){
+    int row_idx =  blockDim.y * blockIdx.y + threadIdx.y;
+    int col_idx =  blockDim.x * blockIdx.x + threadIdx.x;
+    int stk_idx =  blockDim.z * blockIdx.z + threadIdx.z;
+    if (row_idx < {{y_sampling}} && col_idx < {{x_sampling}} && stk_idx < z_size)
+    {
+        arr_3d[stk_idx][row_idx][col_idx] *= arr_2d[z_index][row_idx][col_idx] * scale;
+    }
+}
 __global__ void mod_square_stack(pycuda::complex<float> arr_3d[][{{y_sampling}}][{{x_sampling}}], int z_size){
     int row_idx = blockDim.y * blockIdx.y + threadIdx.y;
     int col_idx = blockDim.x * blockIdx.x + threadIdx.x;

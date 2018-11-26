@@ -1,7 +1,7 @@
 from .database import kirkland_params
 from .optics import *
 from .utils import *
-from .probe_kernels import ProbeKernels
+from .cuda_kernels import ProbeKernels, PotentialKernels
 import numpy as np
 from scipy.special import k0
 import multiprocessing as mp
@@ -133,11 +133,10 @@ class MSA(object):
         slice_num = args
         mask = np.logical_and(self.supercell_xyz[:, -1] >= slice_num * self.slice_t,
                               self.supercell_xyz[:, -1] < (slice_num + 1) * self.slice_t)
-        # TODO create empty slice that is byte aligned using fftw
         arr_slice = np.zeros(self.sampling, dtype=np.float32)
         for Z, xyz in zip(self.supercell_Z[mask], self.supercell_xyz[mask]):
             pot = self.cached_pots[Z]
-            x_pix, y_pix = xyz[:2] * self.sampling / self.dims[:2]
+            y_pix, x_pix = xyz[:2][::-1] / self.pix_size
             y_start, y_end = int(y_pix - pot.shape[0] / 2), int(y_pix + pot.shape[0] / 2)
             x_start, x_end = int(x_pix - pot.shape[1] / 2), int(x_pix + pot.shape[1] / 2)
             repl_y = slice(max(y_start, 0), y_end)
@@ -415,42 +414,73 @@ class MSAHybrid(MSA):
 
 class MSAGPU(MSAHybrid):
     def build_potential_slices(self, slice_thickness):
+        # find number of slices and atomic sites per slice
         self.slice_t = slice_thickness
         self.num_slices = np.int32(np.floor(self.dims[-1] / slice_thickness))
-        tasks = [((self, slice_num), {'method': 'build_slices'}) for slice_num in range(self.num_slices)]
-        processes = min(mp.cpu_count(), self.num_slices)
-        chunk = np.int(np.floor(self.num_slices / processes))
-        pool = mp.Pool(processes=processes)
-        jobs = pool.imap(unwrap, tasks, chunksize=chunk)
-        self.potential_slices = np.array([j for j in jobs])
-        pool.close()
+        masks = [np.logical_and(self.supercell_xyz[:, -1] >= slice_num * msa.slice_t,
+                        self.supercell_xyz[:, -1] < (slice_num + 1) * msa.slice_t)
+                        for slice_num in range(self.num_slices)]
+        Z_arr = np.array([self.supercell_Z[mask] for mask in masks])
+        supercell_pix = self.supercell_xyz[:,:2]/self.pix_size[::-1]
+        yx_arr = np.array([supercell_pix[mask] for mask in masks])
+        Zxy_input = np.array([np.column_stack([np.zeros_like(Z),yx[:,1],yx[:,0]]).astype(np.int32).flatten()
+                                            for Z, yx in zip(Z_arr, yx_arr)])
+        # pad sites array to have equal num of element per slice
+        shapes = np.array([itm.shape for itm in Zxy_input])
+        pads = [(0, shapes.max() - itm.shape) for itm in Zxy_input]
+        padded = [np.pad(itm,pad,'constant',constant_values=-1) for pad, itm in zip(pads, Zxy_input)]
+        Zxy_input = np.vstack([np.pad(itm,pad,'constant',constant_values=-1) for pad, itm in zip(pads, Zxy_input)])
+
+        # stack atomic potentials of unique elements
+        unique_Z = np.unique(self.supercell_Z)
+        atom_pot_stack = np.array([msa.cached_pots[uq_Z] for uq_Z in unique_Z]).astype(np.float32)
+
+        # compile/load cuda kernels
+        self._load_potential_kernels(atom_pot_stack.shape[1:], Zxy_input.shape[-1], Zxy_input.shape[0].shape[0])
+
+        # allocate memory
+        atom_pot_stack_d = cuda.to_device(atom_pot_stack)
+        sites_d = cuda.to_device(Zxy_input)
+        self.potential_slices = cuda.aligned_empty((int(self.num_slices),
+                    int(self.sampling[0]), int(self.sampling[1])), np.complex64)
+        self.potential_slices = cuda.register_host_memory(self.potential_slices)
+        potential_slices_d = cuda.to_device(self.potential_slices)
+
+        # store device allocation ref for later use
+        self.pot_dev_ptr = potential_slices_d
+
+        # get block, grid dimensions
+        block, grid = self._get_blockgrid([self.sampling[1], self.sampling[0], self.num_slice],
+                    mode='3D')
+        build_potential = self.pot_kernels['build_potential']
+
+        # build potential
+        build_potential(potential_slices_d, atom_pot_stack_d, sites_d,
+                        np.float32(self.sigma), block=block, grid=grid)
+        ctx.synchronize()
+        cuda.memcpy_dtoh(self.potential_slices, potential_slices_d)
+
+        # free gpu memory
+        sites_d.free()
+        atom_pot_stack_d.free()
         self.print_verbose('Built %d potential slices with shape:%s pixels' % (self.potential_slices.shape[0],
                                                                   format(self.potential_slices.shape[1:])))
-
-    def make_slice(self, args):
-        # overriding this method
-        slice_num = args
-        mask = np.logical_and(self.supercell_xyz[:, -1] >= slice_num * self.slice_t,
-                              self.supercell_xyz[:, -1] < (slice_num + 1) * self.slice_t)
-        # TODO create empty slice that is byte aligned using fftw
-        arr_slice = np.zeros(self.sampling, dtype=np.float32)
-        for Z, xyz in zip(self.supercell_Z[mask], self.supercell_xyz[mask]):
-            pot = self.cached_pots[Z]
-            x_pix, y_pix = xyz[:2] * self.sampling / self.dims[:2]
-            y_start, y_end = int(y_pix - pot.shape[0] / 2), int(y_pix + pot.shape[0] / 2)
-            x_start, x_end = int(x_pix - pot.shape[1] / 2), int(x_pix + pot.shape[1] / 2)
-            repl_y = slice(max(y_start, 0), y_end)
-            repl_x = slice(max(x_start, 0), x_end)
-            offset_y = abs(min(y_start, 0))
-            offset_x = abs(min(x_start, 0))
-            repl_shape = arr_slice[repl_y, repl_x].shape
-            arr_slice[repl_y, repl_x] += pot[offset_y:repl_shape[0] + offset_y, offset_x:repl_shape[1] + offset_x]
-        return np.exp(1.j * self.sigma * arr_slice)
 
     def _load_kernels(self):
         try:
             probe_kernels = ProbeKernels(sampling=self.sampling)
             self.kernels = probe_kernels.kernels
+            self.print_verbose('CUDA C/C++ Kernels compiled successfully')
+        except cuda.CompileError:
+            warn('CUDA C/C++ Kernels did not compile successfully')
+            raise cuda.CompileError
+
+    def _load_potential_kernels(self, potential_shape, num_sites, sites_size):
+        try:
+            potential_kernels = PotentialKernels(sampling=self.sampling,
+            num_slices=self.num_slices, potential_shape=potential_shape, num_sites=num_sites,
+            sites_size=sites_size)
+            self.pot_kernels = potential_kernels.kernels
             self.print_verbose('CUDA C/C++ Kernels compiled successfully')
         except cuda.CompileError:
             warn('CUDA C/C++ Kernels did not compile successfully')
