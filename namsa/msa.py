@@ -417,8 +417,8 @@ class MSAGPU(MSAHybrid):
         # find number of slices and atomic sites per slice
         self.slice_t = slice_thickness
         self.num_slices = np.int32(np.floor(self.dims[-1] / slice_thickness))
-        masks = [np.logical_and(self.supercell_xyz[:, -1] >= slice_num * msa.slice_t,
-                        self.supercell_xyz[:, -1] < (slice_num + 1) * msa.slice_t)
+        masks = [np.logical_and(self.supercell_xyz[:, -1] >= slice_num * self.slice_t,
+                        self.supercell_xyz[:, -1] < (slice_num + 1) * self.slice_t)
                         for slice_num in range(self.num_slices)]
         Z_arr = np.array([self.supercell_Z[mask] for mask in masks])
         supercell_pix = self.supercell_xyz[:,:2]/self.pix_size[::-1]
@@ -433,10 +433,11 @@ class MSAGPU(MSAHybrid):
 
         # stack atomic potentials of unique elements
         unique_Z = np.unique(self.supercell_Z)
-        atom_pot_stack = np.array([msa.cached_pots[uq_Z] for uq_Z in unique_Z]).astype(np.float32)
+        atom_pot_stack = np.array([self.cached_pots[uq_Z] for uq_Z in unique_Z]).astype(np.float32)
 
         # compile/load cuda kernels
-        self._load_potential_kernels(atom_pot_stack.shape[1:], Zxy_input.shape[-1], Zxy_input.shape[0].shape[0])
+        self._load_potential_kernels([atom_pot_stack.shape[1], atom_pot_stack.shape[2]],
+                                                Zxy_input.shape[-1])
 
         # allocate memory
         atom_pot_stack_d = cuda.to_device(atom_pot_stack)
@@ -450,7 +451,7 @@ class MSAGPU(MSAHybrid):
         self.pot_dev_ptr = potential_slices_d
 
         # get block, grid dimensions
-        block, grid = self._get_blockgrid([self.sampling[1], self.sampling[0], self.num_slice],
+        block, grid = self._get_blockgrid([self.sampling[1], self.sampling[0], self.num_slices],
                     mode='3D')
         build_potential = self.pot_kernels['build_potential']
 
@@ -458,7 +459,7 @@ class MSAGPU(MSAHybrid):
         build_potential(potential_slices_d, atom_pot_stack_d, sites_d,
                         np.float32(self.sigma), block=block, grid=grid)
         ctx.synchronize()
-        cuda.memcpy_dtoh(self.potential_slices, potential_slices_d)
+        cuda.memcpy_dtoh_async(self.potential_slices, potential_slices_d, cuda.Stream())
 
         # free gpu memory
         sites_d.free()
@@ -475,10 +476,10 @@ class MSAGPU(MSAHybrid):
             warn('CUDA C/C++ Kernels did not compile successfully')
             raise cuda.CompileError
 
-    def _load_potential_kernels(self, potential_shape, num_sites, sites_size):
+    def _load_potential_kernels(self, potential_shape, sites_size ):
         try:
             potential_kernels = PotentialKernels(sampling=self.sampling,
-            num_slices=self.num_slices, potential_shape=potential_shape, num_sites=num_sites,
+            num_slices=self.num_slices, potential_shape=potential_shape,
             sites_size=sites_size)
             self.pot_kernels = potential_kernels.kernels
             self.print_verbose('CUDA C/C++ Kernels compiled successfully')
@@ -635,7 +636,6 @@ class MSAGPU(MSAHybrid):
         self.mask = np.empty(self.sampling, dtype=np.float32)
         self.mask = cuda.register_host_memory(self.mask)
         mask_d = cuda.to_device(self.mask)
-        pot_slices_d = [cuda.to_device(pot_slice) for pot_slice in self.potential_slices]
         grid_steps_d = cuda.to_device(self.grid_steps.astype(np.int32))
         grid_range_d = cuda.to_device(self.grid_range.astype(np.float32))
         psi_k_d = cuda.to_device(self.psi_k)
@@ -709,7 +709,7 @@ class MSAGPU(MSAHybrid):
             for batch, stream, probe_d, plan,  norm_const in zip(batches, streams, probes_d, plans, norm_consts):
                 num_probes = np.int32(self.probe_positions[phase][batch].shape[0])
                 self.print_debug('batch: %s' % format(batch))
-                self.__propagate_beams(num_probes, batch, probe_d, propag_d, psi_k_d, norm_const, grid_steps_d, grid_range_d, pot_slices_d,
+                self.__propagate_beams(num_probes, batch, probe_d, propag_d, psi_k_d, norm_const, grid_steps_d, grid_range_d,
                                      self.probes[phase][batch], plan, ones_d, stream)
             ctx.synchronize()
         # 4. clean-up
@@ -721,12 +721,12 @@ class MSAGPU(MSAHybrid):
                del probe_d, norm_const, plan
             ctx.synchronize()
             self.print_verbose('finished simulation phase #%d' % i)
-            self.probes = self.probes.astype(np.float32) # discard imaginary
+            # self.probes = self.probes.astype(np.float32) # discard imaginary
             sim_t = time()-t
             self.print_verbose('Propagated %d probes in %2.4f s' % (self.probe_positions[phase].shape[0], sim_t))
 
     def __propagate_beams(self, num_probes, batch, psi_pos_d, propag_d, psi_k_d,
-                        norm_const_d, grid_steps_d, grid_range_d, pot_slices_d,
+                        norm_const_d, grid_steps_d, grid_range_d,
                         psi_x_pos_pin, fft_plan_probe, ones_d, stream):
         """
         :param batch:
@@ -736,7 +736,6 @@ class MSAGPU(MSAHybrid):
         :param norm_const_d:
         :param grid_steps_d:
         :param grid_range_d:
-        :param pot_slices_d:
         :param psi_x_pos_pin:
         :param fft_plan_probe:
         :param stream:
@@ -749,8 +748,11 @@ class MSAGPU(MSAHybrid):
 
         # grab needed kernels
         probe_stack_func = self.kernels['probes_stack']
-        multwise_stack_func = self.kernels['mult_wise_c3d_c2d']
-        multwise_stack_func.prepare(("P", "P", np.int32, np.float32))
+        # multwise2d_stack_func = self.kernels['mult_wise_c3d_c2d']
+        multwise2d_stack_func = self.kernels['mult_wise_c3d_c2d']
+        multwise_stack_func = self.kernels['mult_wise_c3d_c3d_ind']
+        multwise_stack_func.prepare(("P", "P", np.int32, np.int32, np.float32))
+        multwise2d_stack_func.prepare(("P", "P", np.int32, np.float32))
         fftshift_func = self.kernels['fftshift_2d_stack']
         norm_const_func = self.kernels['norm_const']
         normalize_func = self.kernels['normalize']
@@ -769,31 +771,32 @@ class MSAGPU(MSAHybrid):
         ### TODO: Check why normalization is off by 1e-3.
         self.norm = np.empty(num_probes,dtype=np.float32)
         cuda.memcpy_dtoh_async(self.norm, norm_const_d, stream=stream)
-        normalize_func(psi_pos_d, norm_const_d, num_probes, block=block_3d, grid=grid_3d, stream=stream)
-        ctx.synchronize()
-
-
-        # 2. Propagate probes through atomic potential
-        ctx.synchronize()
-        for i in range(self.num_slices):
-            self.print_debug('Atomic potential slice #%d' % i)
-            multwise_stack_func.prepared_async_call(grid_3d, block_3d, stream, psi_pos_d, pot_slices_d[i], num_probes,
-                                                    np.float32(1/np.prod(self.sampling)))
-            #ctx.synchronize()
-            cufft.cufftExecC2C(fft_plan_probe.handle, int(psi_pos_d), int(psi_pos_d), cufft.CUFFT_FORWARD)
-            #ctx.synchronize()
-            multwise_stack_func.prepared_async_call(grid_3d, block_3d, stream, psi_pos_d, propag_d, num_probes,
-                                                    np.float32(1.0))
-            #ctx.synchronize()
-            cufft.cufftExecC2C(fft_plan_probe.handle, int(psi_pos_d), int(psi_pos_d), cufft.CUFFT_INVERSE)
-            #ctx.synchronize()
-
-        multwise_stack_func.prepared_async_call(grid_3d, block_3d, stream, psi_pos_d, ones_d, num_probes,
-                                                np.float32(1 / (np.prod(self.sampling))))
-        cufft.cufftExecC2C(fft_plan_probe.handle, int(psi_pos_d), int(psi_pos_d), cufft.CUFFT_FORWARD)
-        multwise_stack_func.prepared_async_call(grid_3d, block_3d, stream, psi_pos_d, ones_d, num_probes,
-                                                np.float32(np.sqrt(np.prod(self.sampling))))
-        mod_square_func(psi_pos_d, num_probes, block=block_3d, grid=grid_3d, stream=stream)
+        # normalize_func(psi_pos_d, norm_const_d, num_probes, block=block_3d, grid=grid_3d, stream=stream)
+        # ctx.synchronize()
+        #
+        #
+        # # 2. Propagate probes through atomic potential
+        # ctx.synchronize()
+        # for i in range(self.num_slices):
+        #     self.print_debug('Atomic potential slice #%d' % i)
+        #     multwise_stack_func.prepared_async_call(grid_3d, block_3d, stream, psi_pos_d, self.pot_dev_ptr, num_probes, np.int32(i),
+        #                                             np.float32(1/np.prod(self.sampling)))
+        #     #ctx.synchronize()
+        #     cufft.cufftExecC2C(fft_plan_probe.handle, int(psi_pos_d), int(psi_pos_d), cufft.CUFFT_FORWARD)
+        #     #ctx.synchronize()
+        #     multwise2d_stack_func.prepared_async_call(grid_3d, block_3d, stream, psi_pos_d, propag_d, num_probes,
+        #                                             np.float32(1.0))
+        #     #ctx.synchronize()
+        #     cufft.cufftExecC2C(fft_plan_probe.handle, int(psi_pos_d), int(psi_pos_d), cufft.CUFFT_INVERSE)
+        #     #ctx.synchronize()
+        #
+        #
+        # multwise2d_stack_func.prepared_async_call(grid_3d, block_3d, stream, psi_pos_d, ones_d, num_probes,
+        #                                         np.float32(1 / (np.prod(self.sampling))))
+        # cufft.cufftExecC2C(fft_plan_probe.handle, int(psi_pos_d), int(psi_pos_d), cufft.CUFFT_FORWARD)
+        # multwise2d_stack_func.prepared_async_call(grid_3d, block_3d, stream, psi_pos_d, ones_d, num_probes,
+        #                                         np.float32(np.sqrt(np.prod(self.sampling))))
+        # mod_square_func(psi_pos_d, num_probes, block=block_3d, grid=grid_3d, stream=stream)
         ctx.synchronize()
         cuda.memcpy_dtoh_async(psi_x_pos_pin, psi_pos_d, stream=stream)
 
