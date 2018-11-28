@@ -28,7 +28,9 @@ class ProbeKernels(object):
         self.kernels['mult_wise_c3d_c2d'] = src.get_function('mult_wise_c3d_c2d')
         self.kernels['mult_wise_c3d_c3d_ind'] = src.get_function('mult_wise_c3d_c3d_ind')
         self.kernels['propagator'] = src.get_function('propagator')
-        self.kernels['norm_const'] = src.get_function('norm_const')
+        self.kernels['norm_stack'] = src.get_function('norm_const_stack')
+        self.kernels['norm'] = src.get_function('norm_const')
+        self.kernels['normalize_stack'] = src.get_function('normalize_stack')
         self.kernels['normalize'] = src.get_function('normalize')
         self.kernels['mod_square_stack'] = src.get_function('mod_square_stack')
 

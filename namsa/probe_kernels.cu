@@ -36,7 +36,7 @@ __device__ float phase_shift(float k_max, int size_x, int size_y, int col_idx, i
 
 
 //TODO: 2d vectorize the indexing [idx]
-__global__ void norm_const(pycuda::complex<float> arr[][{{x_sampling}} * {{y_sampling}}], float *norm, int size_z) {
+__global__ void norm_const_stack(pycuda::complex<float> arr[][{{x_sampling}} * {{y_sampling}}], float *norm, int size_z) {
   float sum = 0.f;
   int stk_idx = blockIdx.y * blockDim.y + threadIdx.y;
   if (stk_idx < size_z)
@@ -55,7 +55,33 @@ __global__ void norm_const(pycuda::complex<float> arr[][{{x_sampling}} * {{y_sam
   }
 }
 
-__global__ void normalize(pycuda::complex<float> arr[][{{y_sampling}}][{{x_sampling}}], float *norm, int size_z){
+__global__ void norm_const(pycuda::complex<float> arr[][{{x_sampling}} * {{y_sampling}}], float* norm) {
+  float sum = 0.f;
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  for(idx;  idx < {{x_sampling}} * {{y_sampling}} ; idx += blockDim.x * gridDim.x)
+    {
+       sum += pycuda::norm(arr[0][idx]);
+    }
+  int mask = __ballot_sync(FULL_MASK, idx < {{x_sampling}} * {{y_sampling}});
+  sum = warpReduceSumSync(sum, mask);
+  if ((threadIdx.x & (warpSize - 1)) == 0)
+   {
+    atomicAdd(norm, sum);
+   }
+}
+
+__global__ void normalize(pycuda::complex<float> arr[][{{y_sampling}}][{{x_sampling}}], float norm, int size_z){
+    int stk_idx = blockIdx.z * blockDim.z + threadIdx.z;
+    int row_idx = blockIdx.y * blockDim.y + threadIdx.y;
+    int col_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row_idx < {{y_sampling}} && col_idx < {{x_sampling}} && stk_idx < size_z)
+    {
+        arr[stk_idx][row_idx][col_idx] = arr[stk_idx][row_idx][col_idx] * 1.f / norm;
+        // arr[stk_idx][row_idx][col_idx]._M_im /= norm;
+    }
+}
+
+__global__ void normalize_stack(pycuda::complex<float> arr[][{{y_sampling}}][{{x_sampling}}], float *norm, int size_z){
     int stk_idx = blockIdx.z * blockDim.z + threadIdx.z;
     int row_idx = blockIdx.y * blockDim.y + threadIdx.y;
     int col_idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -113,7 +139,7 @@ __global__ void mod_square_stack(pycuda::complex<float> arr_3d[][{{y_sampling}}]
     int stk_idx = blockDim.z * blockIdx.z + threadIdx.z;
     if (row_idx < {{y_sampling}} && col_idx < {{x_sampling}} && stk_idx < z_size)
     {
-      arr_3d[stk_idx][row_idx][col_idx] = pycuda::norm(arr_3d[stk_idx][row_idx][col_idx]);
+      arr_3d[stk_idx][row_idx][col_idx] = pycuda::norm(arr_3d[stk_idx][row_idx][col_idx]) ;
     }
 }
 

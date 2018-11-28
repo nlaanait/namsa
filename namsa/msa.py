@@ -7,7 +7,7 @@ from scipy.special import k0
 import multiprocessing as mp
 import ctypes
 import sys
-from warnings import warn
+from warnings import warn, catch_warnings, simplefilter
 import os
 import pyfftw
 import pycuda
@@ -21,6 +21,8 @@ from mpi4py import MPI
 
 XYZ_dtype = [('atomic_number', 'i'), ('x', 'f'), ('y', 'f'), ('z', 'f'), ('occ', 'f'), ('DW', 'f')]
 
+def catch_warn():
+    warn('complex_casting', RuntimeWarning)
 
 def unwrap(args):
     (msa, params), kwargs = args
@@ -545,7 +547,8 @@ class MSAGPU(MSAHybrid):
         fftshift_func(psi_x_d, shape_y, block=block, grid=grid)
         #ctx.synchronize()
         cuda.memcpy_dtoh_async(self.psi, psi_x_d, cuda.Stream())
-        self.psi /= np.sqrt(np.sum(np.abs(self.psi)**2))
+        self.normalization = np.sum(np.abs(self.psi)**2)
+        self.psi /= np.sqrt(self.normalization)
         cuda.memcpy_dtoh_async(self.psi_k, psi_k_d, cuda.Stream())
 
         # free gpu mem
@@ -711,19 +714,24 @@ class MSAGPU(MSAHybrid):
                 self.print_debug('batch: %s' % format(batch))
                 self.__propagate_beams(num_probes, batch, probe_d, propag_d, psi_k_d, norm_const, grid_steps_d, grid_range_d,
                                      self.probes[phase][batch], plan, ones_d, stream)
-            ctx.synchronize()
+            # ctx.synchronize()
         # 4. clean-up
             for plan, probe_d, norm_const in zip(plans, probes_d, norm_consts):
                cufft.cufftDestroy(plan.handle)
                probe_d.free()
                norm_const.free()
-               ctx.synchronize()
+               # ctx.synchronize()
                del probe_d, norm_const, plan
             ctx.synchronize()
             self.print_verbose('finished simulation phase #%d' % i)
-            # self.probes = self.probes.astype(np.float32) # discard imaginary
-            sim_t = time()-t
-            self.print_verbose('Propagated %d probes in %2.4f s' % (self.probe_positions[phase].shape[0], sim_t))
+            self.probes[phase][batch] = self.probes[phase][batch]/self.normalization
+        with catch_warnings():
+            simplefilter('ignore')
+            catch_warn()
+            self.probes = self.probes.astype(np.float32) # discard imaginary
+
+        sim_t = time()-t
+        self.print_verbose('Propagated %d probes in %2.4f s' % (self.probe_positions[phase].shape[0], sim_t))
 
     def __propagate_beams(self, num_probes, batch, psi_pos_d, propag_d, psi_k_d,
                         norm_const_d, grid_steps_d, grid_range_d,
@@ -748,13 +756,12 @@ class MSAGPU(MSAHybrid):
 
         # grab needed kernels
         probe_stack_func = self.kernels['probes_stack']
-        # multwise2d_stack_func = self.kernels['mult_wise_c3d_c2d']
         multwise2d_stack_func = self.kernels['mult_wise_c3d_c2d']
         multwise_stack_func = self.kernels['mult_wise_c3d_c3d_ind']
         multwise_stack_func.prepare(("P", "P", np.int32, np.int32, np.float32))
         multwise2d_stack_func.prepare(("P", "P", np.int32, np.float32))
         fftshift_func = self.kernels['fftshift_2d_stack']
-        norm_const_func = self.kernels['norm_const']
+        # norm_const_func = self.kernels['norm_const']
         normalize_func = self.kernels['normalize']
         mod_square_func = self.kernels['mod_square_stack']
 
@@ -766,38 +773,31 @@ class MSAGPU(MSAHybrid):
         #ctx.synchronize()
         fftshift_func(psi_pos_d, num_probes, block=block_3d, grid=grid_3d, shared=0, stream=stream)
         #ctx.synchronize()
-        norm_const_func(psi_pos_d, norm_const_d, num_probes, block=block_1d, grid=grid_1d, stream=stream)
-        # # ctx.synchronize()
-        ### TODO: Check why normalization is off by 1e-3.
-        self.norm = np.empty(num_probes,dtype=np.float32)
-        cuda.memcpy_dtoh_async(self.norm, norm_const_d, stream=stream)
-        # normalize_func(psi_pos_d, norm_const_d, num_probes, block=block_3d, grid=grid_3d, stream=stream)
+        ### TODO: Check why cuda normalization is off
+
+        # 2. Propagate probes through atomic potential
         # ctx.synchronize()
-        #
-        #
-        # # 2. Propagate probes through atomic potential
+        for i in range(self.num_slices):
+            # self.print_debug('Atomic potential slice #%d' % i)
+            multwise_stack_func.prepared_async_call(grid_3d, block_3d, stream, psi_pos_d, self.pot_dev_ptr, num_probes, np.int32(i),
+                                                    np.float32(1/np.prod(self.sampling)))
+            #ctx.synchronize()
+            cufft.cufftExecC2C(fft_plan_probe.handle, int(psi_pos_d), int(psi_pos_d), cufft.CUFFT_FORWARD)
+            #ctx.synchronize()
+            multwise2d_stack_func.prepared_async_call(grid_3d, block_3d, stream, psi_pos_d, propag_d, num_probes,
+                                                    np.float32(1.0))
+            #ctx.synchronize()
+            cufft.cufftExecC2C(fft_plan_probe.handle, int(psi_pos_d), int(psi_pos_d), cufft.CUFFT_INVERSE)
+            #ctx.synchronize()
+
+
+        multwise2d_stack_func.prepared_async_call(grid_3d, block_3d, stream, psi_pos_d, ones_d, num_probes,
+                                                np.float32(1 / (np.prod(self.sampling))))
+        cufft.cufftExecC2C(fft_plan_probe.handle, int(psi_pos_d), int(psi_pos_d), cufft.CUFFT_FORWARD)
+        multwise2d_stack_func.prepared_async_call(grid_3d, block_3d, stream, psi_pos_d, ones_d, num_probes,
+                                                np.float32(np.sqrt(np.prod(self.sampling))))
+        mod_square_func(psi_pos_d, num_probes, block=block_3d, grid=grid_3d, stream=stream)
         # ctx.synchronize()
-        # for i in range(self.num_slices):
-        #     self.print_debug('Atomic potential slice #%d' % i)
-        #     multwise_stack_func.prepared_async_call(grid_3d, block_3d, stream, psi_pos_d, self.pot_dev_ptr, num_probes, np.int32(i),
-        #                                             np.float32(1/np.prod(self.sampling)))
-        #     #ctx.synchronize()
-        #     cufft.cufftExecC2C(fft_plan_probe.handle, int(psi_pos_d), int(psi_pos_d), cufft.CUFFT_FORWARD)
-        #     #ctx.synchronize()
-        #     multwise2d_stack_func.prepared_async_call(grid_3d, block_3d, stream, psi_pos_d, propag_d, num_probes,
-        #                                             np.float32(1.0))
-        #     #ctx.synchronize()
-        #     cufft.cufftExecC2C(fft_plan_probe.handle, int(psi_pos_d), int(psi_pos_d), cufft.CUFFT_INVERSE)
-        #     #ctx.synchronize()
-        #
-        #
-        # multwise2d_stack_func.prepared_async_call(grid_3d, block_3d, stream, psi_pos_d, ones_d, num_probes,
-        #                                         np.float32(1 / (np.prod(self.sampling))))
-        # cufft.cufftExecC2C(fft_plan_probe.handle, int(psi_pos_d), int(psi_pos_d), cufft.CUFFT_FORWARD)
-        # multwise2d_stack_func.prepared_async_call(grid_3d, block_3d, stream, psi_pos_d, ones_d, num_probes,
-        #                                         np.float32(np.sqrt(np.prod(self.sampling))))
-        # mod_square_func(psi_pos_d, num_probes, block=block_3d, grid=grid_3d, stream=stream)
-        ctx.synchronize()
         cuda.memcpy_dtoh_async(psi_x_pos_pin, psi_pos_d, stream=stream)
 
 
@@ -848,6 +848,7 @@ class MSAMPI(MSAGPU):
             h5_write = False
         super(MSAMPI, self).multislice(*args, **kwargs)
         if h5_write:
+            self.print_rank('writing to h5 file...')
             dset = h5_file.create_dataset('4D_CBED', (self.total_num_probes,
                                 self.sampling[0], self.sampling[1]), dtype=self.probes.dtype)
             # Workaround the large parallel I/O limitation
@@ -880,7 +881,7 @@ class MSAMPI(MSAGPU):
             count = count.astype(np.int64)
             displ *= xy_offset
             displ = displ.astype(np.int64)
-            self.print_debug("rank %d: my # probes: %s, count: %d, displ: %d" %(self.rank, format(self.probes.shape), count[self.rank], displ[self.rank]))
+            self.print_verbose("rank %d: my # probes: %s %s, count: %d, displ: %d" %(self.rank, format(self.probes.shape), self.probes.dtype, count[self.rank], displ[self.rank]))
             # gather
             # comm.Gatherv(self.probes, [receive_buff, count, displ[:-1], MPI.C_FLOAT_COMPLEX], root=0)
             comm.Gatherv(self.probes, [receive_buff, count, displ[:-1], MPI.FLOAT], root=0)
