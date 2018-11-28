@@ -725,13 +725,13 @@ class MSAGPU(MSAHybrid):
             ctx.synchronize()
             self.print_verbose('finished simulation phase #%d' % i)
             self.probes[phase][batch] = self.probes[phase][batch]/self.normalization
+            sim_t = time()-t
+            self.print_verbose('Propagated %d probes in %2.4f s' % (self.probe_positions[phase].shape[0], sim_t))
+
         with catch_warnings():
             simplefilter('ignore')
             catch_warn()
             self.probes = self.probes.astype(np.float32) # discard imaginary
-
-        sim_t = time()-t
-        self.print_verbose('Propagated %d probes in %2.4f s' % (self.probe_positions[phase].shape[0], sim_t))
 
     def __propagate_beams(self, num_probes, batch, psi_pos_d, propag_d, psi_k_d,
                         norm_const_d, grid_steps_d, grid_range_d,
@@ -858,7 +858,7 @@ class MSAMPI(MSAGPU):
             self.print_rank('finished writing h5 file.')
         else:
             receive_buff = None
-            self.print_debug('rank %d: shape of calculated probes = %s' %(self.rank, format(self.probes.shape)))
+            self.print_verbose('rank %d: shape of calculated probes = %s' %(self.rank, format(self.probes.shape)))
             if self.rank == 0:
                 buff_shape = (self.total_num_probes, self.sampling[0], self.sampling[1])
                 self.print_rank('receive buffer shape: %s' %format(buff_shape))
