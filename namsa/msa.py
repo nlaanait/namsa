@@ -473,9 +473,9 @@ class MSAGPU(MSAHybrid):
         try:
             probe_kernels = ProbeKernels(sampling=self.sampling)
             self.kernels = probe_kernels.kernels
-            self.print_verbose('CUDA C/C++ Kernels compiled successfully')
+            self.print_verbose('CUDA C/C++ Probe Kernels compiled successfully')
         except cuda.CompileError:
-            warn('CUDA C/C++ Kernels did not compile successfully')
+            warn('CUDA C/C++ Probe Kernels did not compile successfully')
             raise cuda.CompileError
 
     def _load_potential_kernels(self, potential_shape, sites_size ):
@@ -484,9 +484,9 @@ class MSAGPU(MSAHybrid):
             num_slices=self.num_slices, potential_shape=potential_shape,
             sites_size=sites_size)
             self.pot_kernels = potential_kernels.kernels
-            self.print_verbose('CUDA C/C++ Kernels compiled successfully')
+            self.print_verbose('CUDA C/C++ Potential Kernels compiled successfully')
         except cuda.CompileError:
-            warn('CUDA C/C++ Kernels did not compile successfully')
+            warn('CUDA C/C++ Potential Kernels did not compile successfully')
             raise cuda.CompileError
 
     def build_probe(self, probe_dict={'smooth_apert': True, 'apert_smooth': 50, 'spherical_phase': True,
