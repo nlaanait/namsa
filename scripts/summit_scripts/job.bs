@@ -3,9 +3,10 @@
 #BSUB -J namsa 
 #BSUB -o logs.o%J
 #BSUB -W 15
-#BSUB -nnodes 1 
+#BSUB -nnodes 12 
 #BSUB -alloc_flags "smt4 nvme"
 #BSUB -q batch
+##BSUB -N
 ##BSUB -csm y
 ##BSUB -alloc_flags "smt4 gpumps nvme"
 
@@ -28,7 +29,7 @@ export CIF="${IODIR}/cif_files/Si.cif"
 export H5F="${IODIR}/outputs_${LSB_JOBID}.h5"
 LOG="${IODIR}/namsa_log_${LSB_JOBID}.log"
 
-EXEC="${PYTHON}/bin/python -u ./test_namsa_mpi.py 1.0 0"
+EXEC="${PYTHON}/bin/python -u ./test_namsa_mpi.py 0.75 0"
    
 ### run ###
 jsrun -n${NODES} -a6 -c42 -g6 -r1 --bind=proportional-packed:7 --launch_distribution=packed stdbuf -o0 ./launch.sh "${EXEC}" > $LOG 
