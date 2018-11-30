@@ -1,0 +1,34 @@
+#!/bin/bash -l
+#BSUB -P gen113 
+#BSUB -J namsa 
+#BSUB -o logs.o%J
+#BSUB -W 15
+#BSUB -nnodes 1 
+#BSUB -alloc_flags "smt4 nvme"
+#BSUB -q batch
+##BSUB -csm y
+##BSUB -alloc_flags "smt4 gpumps nvme"
+
+NODES=$(cat ${LSB_DJOB_HOSTFILE} | sort | uniq | grep -v login | grep -v batch | wc -l)
+HOME="/gpfs/wolf/gen113/scratch/nl7/work"
+
+### modules ###
+module load gcc/6.4.0
+module load fftw hdf5 cuda
+
+### python ###
+PYTHON=${HOME}/anaconda3 
+export PYTHONIOENCODING="utf8"
+export LD_LIBRARY_PATH=${PYTHON}/lib:$LD_LIBRARY_PATH
+
+### namsa ###
+cd ${HOME}/MSA
+IODIR="${HOME}/MSA/input_output"
+export CIF="${IODIR}/cif_files/Si.cif"
+export H5F="${IODIR}/outputs_${LSB_JOBID}.h5"
+LOG="${IODIR}/namsa_log_${LSB_JOBID}.log"
+
+EXEC="${PYTHON}/bin/python -u ./test_namsa_mpi.py 1.0 0"
+   
+### run ###
+jsrun -n${NODES} -a6 -c42 -g6 -r1 --bind=proportional-packed:7 --launch_distribution=packed stdbuf -o0 ./launch.sh "${EXEC}" > $LOG 
