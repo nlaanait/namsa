@@ -8,14 +8,14 @@ __inline__ __device__ int warpReduceSumSync(int val, int mask){
   return val;
 }
 
-__device__ double calc_krad(float k_max, int size_x, int size_y, int col_idx, int row_idx){
+ __inline__ __device__ double calc_krad(float k_max, int size_x, int size_y, int col_idx, int row_idx){
     double kx = double(col_idx) * double(k_max)/double(size_x - 1) - double(k_max)/2. ;
     double ky = double(row_idx) * double(k_max)/double(size_y - 1) - double(k_max)/2. ;
     double k_rad = sqrt(kx * kx + ky * ky);
     return k_rad;
 }
 
-__device__ float phase_shift(float k_max, int size_x, int size_y, int col_idx, int row_idx, int stk_idx,
+ __inline__ __device__ float phase_shift(float k_max, int size_x, int size_y, int col_idx, int row_idx, int stk_idx,
     int *grid_step, float *grid_range){
     const double pi = acos(-1.0);
     float kx = float(col_idx) * k_max/float(size_x - 1) - k_max/2.;
@@ -42,10 +42,10 @@ __global__ void norm_const_stack(pycuda::complex<float> arr[][{{x_sampling}} * {
   if (stk_idx < size_z)
   {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    for(idx;  idx < {{x_sampling}} * {{y_sampling}} ; idx += blockDim.x * gridDim.x)
-      {
-         sum += pycuda::norm(arr[stk_idx][idx]);
-      }
+    // for(idx;  idx < {{x_sampling}} * {{y_sampling}} ; idx += blockDim.x * gridDim.x)
+    // {
+    //      sum += pycuda::norm(arr[stk_idx][idx]);
+    // }
     int mask = __ballot_sync(FULL_MASK, idx < {{x_sampling}} * {{y_sampling}});
     sum = warpReduceSumSync(sum, mask);
     if ((threadIdx.x & (warpSize - 1)) == 0)
@@ -58,10 +58,10 @@ __global__ void norm_const_stack(pycuda::complex<float> arr[][{{x_sampling}} * {
 __global__ void norm_const(pycuda::complex<float> arr[][{{x_sampling}} * {{y_sampling}}], float* norm) {
   float sum = 0.f;
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  for(idx;  idx < {{x_sampling}} * {{y_sampling}} ; idx += blockDim.x * gridDim.x)
-    {
-       sum += pycuda::norm(arr[0][idx]);
-    }
+  // for(idx;  idx < {{x_sampling}} * {{y_sampling}} ; idx += blockDim.x * gridDim.x)
+  //   {
+  //      sum += pycuda::norm(arr[0][idx]);
+  //   }
   int mask = __ballot_sync(FULL_MASK, idx < {{x_sampling}} * {{y_sampling}});
   sum = warpReduceSumSync(sum, mask);
   if ((threadIdx.x & (warpSize - 1)) == 0)

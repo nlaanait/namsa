@@ -10,16 +10,18 @@
      {
          const int pot_size_y = {{pot_shape_y}}, pot_size_x = {{pot_shape_x}};
          const int slice_size_y = {{y_sampling}}, slice_size_x = {{x_sampling}};
+         const int num_slices = {{num_slices}}, sites_size = {{sites_size}};
          int row_idx = blockDim.y * blockIdx.y + threadIdx.y;
          int col_idx = blockDim.x * blockIdx.x + threadIdx.x;
          int stk_idx = blockDim.z * blockIdx.z + threadIdx.z;
         // if (stk_idx == 0  && row_idx == 0  && col_idx == 0)
         // {
-        for (int slice_num=0; slice_num<{{num_slices}}; slice_num++)
+        // #pragma unroll
+        for (int slice_num=0; slice_num<num_slices; slice_num++)
         {
              if (stk_idx == slice_num)
              {
-                 for(int my_site=0;my_site<{{sites_size}}/3;my_site++)
+                 for(int my_site=0; my_site<sites_size/3; my_site++)
                  {
                      const int Z = sites[stk_idx][3 * my_site];
                      const int y_cen = sites[stk_idx][3 * my_site + 1];
@@ -40,7 +42,7 @@
          }
          __syncthreads();
 
-        if (col_idx < slice_size_x && row_idx < slice_size_y && stk_idx < {{num_slices}})
+        if (col_idx < slice_size_x && row_idx < slice_size_y && stk_idx < num_slices)
         {
              slice[stk_idx][row_idx][col_idx] = pycuda::complex<float>(cosf(slice[stk_idx][row_idx][col_idx]._M_re * sigma),
                                                                        sinf(slice[stk_idx][row_idx][col_idx]._M_re * sigma));
