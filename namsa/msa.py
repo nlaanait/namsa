@@ -331,7 +331,16 @@ class MSAHybrid(MSA):
             from pycuda.tools import clear_context_caches
             clear_context_caches()
 
+
         atexit.register(_clean_up)
+        return ctx # return context in case of manual clean-up
+
+    @staticmethod
+    def clean_up(ctx):
+        ctx.pop()
+        from pycuda.tools import clear_context_caches
+        clear_context_caches()
+        ctx.detach()
 
     def plan_simulation(self, num_probes=None):
         if num_probes is None:
@@ -429,7 +438,7 @@ class MSAGPU(MSAHybrid):
         # remap Z numbers to indices in cached atomic potential dictionary
         unique_Z = np.unique(self.supercell_Z)
         supercell_Z_idx = np.array([np.argmax(np.equal(unique_Z, Z_val)) for Z_val in self.supercell_Z])
-        Z_arr = np.array([supercell_Z_idx for mask in masks])
+        Z_arr = np.array([supercell_Z_idx[mask] for mask in masks])
         supercell_pix = self.supercell_xyz[:,:2]/self.pix_size[::-1]
         yx_arr = np.array([supercell_pix[mask] for mask in masks])
 
@@ -556,7 +565,7 @@ class MSAGPU(MSAHybrid):
         fftshift_func(psi_x_d, shape_y, block=block, grid=grid)
         #ctx.synchronize()
         cuda.memcpy_dtoh_async(self.psi, psi_x_d, cuda.Stream())
-        self.normalization = np.sum(np.abs(self.psi)**2)
+        self.normalization = np.sum(np.abs(self.psi, dtype=np.float64)**2)
         self.psi /= np.sqrt(self.normalization)
         cuda.memcpy_dtoh_async(self.psi_k, psi_k_d, cuda.Stream())
 
