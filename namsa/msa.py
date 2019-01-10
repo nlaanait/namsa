@@ -9,7 +9,11 @@ import ctypes
 import sys
 from warnings import warn, catch_warnings, simplefilter
 import os
-import pyfftw
+
+try:
+    import pyfftw
+except:
+    pyfftw=None
 import pycuda
 import pycuda.driver as cuda
 import skcuda.fft as skfft
@@ -422,11 +426,17 @@ class MSAGPU(MSAHybrid):
         masks = [np.logical_and(self.supercell_xyz[:, -1] >= slice_num * self.slice_t,
                         self.supercell_xyz[:, -1] < (slice_num + 1) * self.slice_t)
                         for slice_num in range(self.num_slices)]
-        Z_arr = np.array([self.supercell_Z[mask] for mask in masks])
+        # remap Z numbers to indices in cached atomic potential dictionary
+        unique_Z = np.unique(self.supercell_Z)
+        supercell_Z_idx = np.array([np.argmax(np.equal(unique_Z, Z_val)) for Z_val in self.supercell_Z])
+        Z_arr = np.array([supercell_Z_idx for mask in masks])
         supercell_pix = self.supercell_xyz[:,:2]/self.pix_size[::-1]
         yx_arr = np.array([supercell_pix[mask] for mask in masks])
-        Zxy_input = np.array([np.column_stack([np.zeros_like(Z),yx[:,1],yx[:,0]]).astype(np.int32).flatten()
+
+        # stack the input for all slices into a single 1-d array
+        Zxy_input = np.array([np.column_stack([Z, yx[:,1], yx[:,0]]).astype(np.int32).flatten()
                                             for Z, yx in zip(Z_arr, yx_arr)])
+
         # pad sites array to have equal num of element per slice
         shapes = np.array([itm.shape for itm in Zxy_input])
         pads = [(0, shapes.max() - itm.shape) for itm in Zxy_input]
@@ -434,7 +444,6 @@ class MSAGPU(MSAHybrid):
         Zxy_input = np.vstack([np.pad(itm,pad,'constant',constant_values=-1) for pad, itm in zip(pads, Zxy_input)])
 
         # stack atomic potentials of unique elements
-        unique_Z = np.unique(self.supercell_Z)
         atom_pot_stack = np.array([self.cached_pots[uq_Z] for uq_Z in unique_Z]).astype(np.float32)
 
         # compile/load cuda kernels
