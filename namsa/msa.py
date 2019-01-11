@@ -335,13 +335,13 @@ class MSAHybrid(MSA):
         atexit.register(_clean_up)
         return ctx # return context in case of manual clean-up
 
-    @staticmethod
-    def clean_up(ctx):
-        ctx.pop()
-        ctx.detach()
-        ctx = None
-        from pycuda.tools import clear_context_caches
-        clear_context_caches()
+#     @staticmethod
+#     def clean_up(ctx):
+#         ctx.pop()
+#         ctx.detach()
+#         ctx = None
+#         from pycuda.tools import clear_context_caches
+#         clear_context_caches()
         
     def plan_simulation(self, num_probes=None):
         if num_probes is None:
@@ -429,6 +429,21 @@ class MSAHybrid(MSA):
 
 
 class MSAGPU(MSAHybrid):
+    
+    @staticmethod
+    def clean_up(ctx=None, vars=None):
+        if vars is not None:
+            for var in vars:
+                if var is not None: 
+                    var.free()
+        if ctx is not None:
+            ctx.pop()
+            ctx.detach()
+            ctx = None
+            from pycuda.tools import clear_context_caches
+            clear_context_caches()
+
+    
     def build_potential_slices(self, slice_thickness):
         # find number of slices and atomic sites per slice
         self.slice_t = slice_thickness
@@ -465,6 +480,8 @@ class MSAGPU(MSAHybrid):
         sites_d = cuda.to_device(Zxy_input)
         self.potential_slices = cuda.aligned_empty((int(self.num_slices),
                     int(self.sampling[0]), int(self.sampling[1])), np.complex64)
+        self.vars = []
+        self.vars.append(self.potential_slices.base)
         self.potential_slices = cuda.register_host_memory(self.potential_slices)
         potential_slices_d = cuda.to_device(self.potential_slices)
 
@@ -487,6 +504,9 @@ class MSAGPU(MSAHybrid):
         atom_pot_stack_d.free()
         self.print_verbose('Built %d potential slices with shape:%s pixels' % (self.potential_slices.shape[0],
                                                                   format(self.potential_slices.shape[1:])))
+        # unregister host memory
+        #self.potential_slices.base.unregister()
+        #self.potential_slices.base.free()
 
     def _load_kernels(self):
         try:
@@ -540,12 +560,12 @@ class MSAGPU(MSAHybrid):
 
         # allocate memory
         self.apert = np.empty(self.sampling, dtype=np.float32)
-        self.apert = cuda.register_host_memory(self.apert)
+        #self.apert = cuda.register_host_memory(self.apert)
         apert_d = cuda.mem_alloc(self.apert.nbytes)
         self.psi_k = np.empty(self.sampling, dtype=np.complex64)
-        self.psi_k = cuda.register_host_memory(self.psi_k)
+        #self.psi_k = cuda.register_host_memory(self.psi_k)
         self.psi = np.empty_like(self.psi_k)
-        self.psi = cuda.register_host_memory(self.psi)
+        #self.psi = cuda.register_host_memory(self.psi)
         psi_k_d = cuda.mem_alloc(self.psi_k.nbytes)
         psi_x_d = cuda.mem_alloc(self.psi_k.nbytes)
 
@@ -575,6 +595,11 @@ class MSAGPU(MSAHybrid):
         psi_k_d.free()
         apert_d.free()
         cufft.cufftDestroy(fft_plan.handle)
+        
+        # unregister host memory
+        #self.apert.unregister()
+        #self.psi_k.unregister()
+        #self.psi.unregister()
 
     def generate_probe_positions(self, probe_step=np.array([0.1, 0.1]), probe_range=np.array([[0., 1.0], [0., 1.0]])):
         grid_steps_x, grid_steps_y = np.floor(np.diff(probe_range).flatten() * self.dims[:2] / probe_step).astype(np.int)
@@ -652,10 +677,12 @@ class MSAGPU(MSAHybrid):
 
         # allocate memory
         self.probes = np.empty((num_probes, shape_y, shape_x), dtype=np.complex64)
-        self.propag = np.empty(self.sampling, dtype=np.complex64)
+        self.propag = cuda.aligned_empty((int(self.sampling[0]), int(self.sampling[1])), np.complex64)
+        self.vars.append(self.propag.base)
         self.propag = cuda.register_host_memory(self.propag)
         propag_d = cuda.to_device(self.propag)
-        self.mask = np.empty(self.sampling, dtype=np.float32)
+        self.mask = cuda.aligned_empty((int(self.sampling[0]), int(self.sampling[1])), np.float32)
+        self.vars.append(self.mask.base)
         self.mask = cuda.register_host_memory(self.mask)
         mask_d = cuda.to_device(self.mask)
         grid_steps_d = cuda.to_device(self.grid_steps.astype(np.int32))
@@ -667,8 +694,11 @@ class MSAGPU(MSAHybrid):
         else:
             # pinned memory is default
             self.probes = cuda.aligned_empty((int(self.num_probes), int(self.sampling[0]), int(self.sampling[1])), np.complex64)
+            self.vars.append(self.probes.base)
             self.probes = cuda.register_host_memory(self.probes)
-        ones = cuda.register_host_memory(np.ones(self.sampling, dtype=np.complex64))
+        ones = cuda.aligned_zeros((int(self.sampling[0]), int(self.sampling[1])), np.complex64) + 1
+        self.vars.append(ones.base)
+        ones = cuda.register_host_memory(ones)
         ones_d = cuda.mem_alloc(ones.nbytes)
         cuda.memcpy_htod_async(ones_d, ones, cuda.Stream())
 
