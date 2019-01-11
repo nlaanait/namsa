@@ -16,7 +16,7 @@ class ProbeKernels(object):
         self.y_sampling = np.int32(sampling[0])
         kernels = cuda_kerns.render(type=dtype_to_ctype(np.complex64), y_sampling=self.y_sampling,
                                     x_sampling=self.x_sampling)
-        src = SourceModule(kernels)
+        src = SourceModule(kernels, cache_dir=False)
         self.kernels['hard_aperture'] = src.get_function('hard_aperture')
         self.kernels['soft_aperture'] = src.get_function('soft_aperture')
         self.kernels['spherical_phase_error'] = src.get_function('spherical_phase_error')
@@ -52,6 +52,6 @@ class PotentialKernels:
                                pot_shape_y=self.pot_shape_y, pot_shape_x=self.pot_shape_x,
                                sites_size=self.sites_size, num_slices=self.num_slices)
                                # max_size=self.sites_size)
-        src = SourceModule(kernels)
+        src = SourceModule(kernels, cache_dir=False)
         self.kernels['build_potential'] = src.get_function('BuildScatteringPotential')
         # self.kernels['build_potential'] = src.get_function('makePotSlice')

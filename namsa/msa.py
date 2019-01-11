@@ -759,6 +759,7 @@ class MSAGPU(MSAHybrid):
         grid_range_d.free()
         grid_steps_d.free()
         ones_d.free()
+        return None
 
     def __propagate_beams(self, num_probes, batch, psi_pos_d, propag_d, psi_k_d,
                         norm_const_d, grid_steps_d, grid_range_d,
