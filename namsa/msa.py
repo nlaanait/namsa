@@ -338,10 +338,11 @@ class MSAHybrid(MSA):
     @staticmethod
     def clean_up(ctx):
         ctx.pop()
+        ctx.detach()
+        ctx = None
         from pycuda.tools import clear_context_caches
         clear_context_caches()
-        ctx.detach()
-
+        
     def plan_simulation(self, num_probes=None):
         if num_probes is None:
             num_probes = self.num_probes
@@ -745,11 +746,19 @@ class MSAGPU(MSAHybrid):
             self.probes[phase][batch] = self.probes[phase][batch]/self.normalization
             sim_t = time()-t
             self.print_verbose('Propagated %d probes in %2.4f s' % (self.probe_positions[phase].shape[0], sim_t))
-
+        
         with catch_warnings():
             simplefilter('ignore')
             catch_warn()
             self.probes = self.probes.astype(np.float32) # discard imaginary
+        # clean up device variables
+        self.pot_dev_ptr.free()
+        mask_d.free()
+        propag_d.free()
+        psi_k_d.free()
+        grid_range_d.free()
+        grid_steps_d.free()
+        ones_d.free()
 
     def __propagate_beams(self, num_probes, batch, psi_pos_d, propag_d, psi_k_d,
                         norm_const_d, grid_steps_d, grid_range_d,
