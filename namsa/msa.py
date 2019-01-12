@@ -442,7 +442,6 @@ class MSAGPU(MSAHybrid):
             ctx = None
             from pycuda.tools import clear_context_caches
             clear_context_caches()
-
     
     def build_potential_slices(self, slice_thickness):
         # find number of slices and atomic sites per slice
@@ -643,7 +642,7 @@ class MSAGPU(MSAHybrid):
             grid_1d = (int((shape_x * shape_y) / block_1d[0]), int(shape_z), 1)
             return block_1d, grid_1d
 
-    def multislice(self, bandwidth=1/3, unified_mem=False, batch_size=256):
+    def multislice(self, bandwidth=1/3, unified_mem=False, batch_size=256, transmit=True):
         """
 
         :param bandwidth:
@@ -762,7 +761,7 @@ class MSAGPU(MSAHybrid):
                 num_probes = np.int32(self.probe_positions[phase][batch].shape[0])
                 self.print_debug('batch: %s' % format(batch))
                 self.__propagate_beams(num_probes, batch, probe_d, propag_d, psi_k_d, norm_const, grid_steps_d, grid_range_d,
-                                     self.probes[phase][batch], plan, ones_d, stream)
+                                     self.probes[phase][batch], plan, ones_d, stream, transmit=transmit)
             # ctx.synchronize()
         # 4. clean-up
             for plan, probe_d, norm_const in zip(plans, probes_d, norm_consts):
@@ -793,7 +792,7 @@ class MSAGPU(MSAHybrid):
 
     def __propagate_beams(self, num_probes, batch, psi_pos_d, propag_d, psi_k_d,
                         norm_const_d, grid_steps_d, grid_range_d,
-                        psi_x_pos_pin, fft_plan_probe, ones_d, stream):
+                        psi_x_pos_pin, fft_plan_probe, ones_d, stream, transmit=True):
         """
         :param batch:
         :param psi_pos_d:
@@ -835,25 +834,26 @@ class MSAGPU(MSAHybrid):
 
         # 2. Propagate probes through atomic potential
         # ctx.synchronize()
-        for i in range(self.num_slices):
-            # self.print_debug('Atomic potential slice #%d' % i)
-            multwise_stack_func.prepared_async_call(grid_3d, block_3d, stream, psi_pos_d, self.pot_dev_ptr, num_probes, np.int32(i),
-                                                    np.float32(1/np.prod(self.sampling)))
-            #ctx.synchronize()
+        if transmit:
+            for i in range(self.num_slices):
+                # self.print_debug('Atomic potential slice #%d' % i)
+                multwise_stack_func.prepared_async_call(grid_3d, block_3d, stream, psi_pos_d, self.pot_dev_ptr, num_probes, np.int32(i),
+                                                        np.float32(1/np.prod(self.sampling)))
+                #ctx.synchronize()
+                cufft.cufftExecC2C(fft_plan_probe.handle, int(psi_pos_d), int(psi_pos_d), cufft.CUFFT_FORWARD)
+                #ctx.synchronize()
+                multwise2d_stack_func.prepared_async_call(grid_3d, block_3d, stream, psi_pos_d, propag_d, num_probes,
+                                                        np.float32(1.0))
+                #ctx.synchronize()
+                cufft.cufftExecC2C(fft_plan_probe.handle, int(psi_pos_d), int(psi_pos_d), cufft.CUFFT_INVERSE)
+                #ctx.synchronize()
+
+
+            multwise2d_stack_func.prepared_async_call(grid_3d, block_3d, stream, psi_pos_d, ones_d, num_probes,
+                                                    np.float32(1 / (np.prod(self.sampling))))
             cufft.cufftExecC2C(fft_plan_probe.handle, int(psi_pos_d), int(psi_pos_d), cufft.CUFFT_FORWARD)
-            #ctx.synchronize()
-            multwise2d_stack_func.prepared_async_call(grid_3d, block_3d, stream, psi_pos_d, propag_d, num_probes,
-                                                    np.float32(1.0))
-            #ctx.synchronize()
-            cufft.cufftExecC2C(fft_plan_probe.handle, int(psi_pos_d), int(psi_pos_d), cufft.CUFFT_INVERSE)
-            #ctx.synchronize()
-
-
-        multwise2d_stack_func.prepared_async_call(grid_3d, block_3d, stream, psi_pos_d, ones_d, num_probes,
-                                                np.float32(1 / (np.prod(self.sampling))))
-        cufft.cufftExecC2C(fft_plan_probe.handle, int(psi_pos_d), int(psi_pos_d), cufft.CUFFT_FORWARD)
-        multwise2d_stack_func.prepared_async_call(grid_3d, block_3d, stream, psi_pos_d, ones_d, num_probes,
-                                                np.float32(np.sqrt(np.prod(self.sampling))))
+            multwise2d_stack_func.prepared_async_call(grid_3d, block_3d, stream, psi_pos_d, ones_d, num_probes,
+                                                    np.float32(np.sqrt(np.prod(self.sampling))))
         mod_square_func(psi_pos_d, num_probes, block=block_3d, grid=grid_3d, stream=stream)
         # ctx.synchronize()
         cuda.memcpy_dtoh_async(psi_x_pos_pin, psi_pos_d, stream=stream)
