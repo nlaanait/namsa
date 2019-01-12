@@ -126,3 +126,11 @@ def imageTile(data, padsize=1, padval=0):
     data = data.reshape((n, n) + data.shape[1:]).transpose((0, 2, 1, 3) + tuple(range(4, data.ndim + 1)))
     data = data.reshape((n * data.shape[1], n * data.shape[3]) + data.shape[4:])
     return data
+
+def thin_object_approx(potential_slices, probes):
+    """
+    Simulate the exit wavefunction using a thin-object approximation
+    """
+    psi_pos = probes * np.exp(1.j * potential_slices.sum(0))
+    psi_k = np.abs(np.fft.fft2(psi_pos))
+    return psi_k

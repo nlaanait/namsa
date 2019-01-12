@@ -776,12 +776,13 @@ class MSAGPU(MSAHybrid):
             sim_t = time()-t
             self.print_verbose('Propagated %d probes in %2.4f s' % (self.probe_positions[phase].shape[0], sim_t))
         
-        with catch_warnings():
-            simplefilter('ignore')
-            catch_warn()
-            self.probes = self.probes.astype(np.float32) # discard imaginary
+        if transmit:
+            with catch_warnings():
+                simplefilter('ignore')
+                catch_warn()
+                self.probes = self.probes.astype(np.float32) # discard imaginary
         # clean up device variables
-        self.pot_dev_ptr.free()
+        self.vars.append(self.pot_dev_ptr) # don't de-allocate here to allow for simulations with different probe/exp. params
         mask_d.free()
         propag_d.free()
         psi_k_d.free()
@@ -854,7 +855,7 @@ class MSAGPU(MSAHybrid):
             cufft.cufftExecC2C(fft_plan_probe.handle, int(psi_pos_d), int(psi_pos_d), cufft.CUFFT_FORWARD)
             multwise2d_stack_func.prepared_async_call(grid_3d, block_3d, stream, psi_pos_d, ones_d, num_probes,
                                                     np.float32(np.sqrt(np.prod(self.sampling))))
-        mod_square_func(psi_pos_d, num_probes, block=block_3d, grid=grid_3d, stream=stream)
+            mod_square_func(psi_pos_d, num_probes, block=block_3d, grid=grid_3d, stream=stream)
         # ctx.synchronize()
         cuda.memcpy_dtoh_async(psi_x_pos_pin, psi_pos_d, stream=stream)
 
