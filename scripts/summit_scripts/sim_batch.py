@@ -171,6 +171,7 @@ def simulate(h5g, cif_path, gpu_id=0, clean_up=False):
         msa.clean_up(ctx=None, vars=msa.vars)
 
 def main(cifdir_path, h5dir_path):
+    t = time()
     cifpath_list = get_cif_paths(cifdir_path)
     h5path = os.path.join(h5dir_path, 'batch_%d.h5'% comm_rank)
     if os.path.exists(h5path):
@@ -178,18 +179,21 @@ def main(cifdir_path, h5dir_path):
     else:
         mode ='w'
     with h5py.File(h5path, mode=mode) as f:
-        for idx in range(comm_rank, 10, comm_size):
+        for idx in range(comm_rank, len(cifpath_list), comm_size):
             cif_path = cifpath_list[idx]
-            manual = idx < (10 - comm_size) 
+            manual = idx < ( len(cifpath_list) - comm_size) 
             spgroup_num, matname = parse_cif_path(cif_path)
             try:
                 h5g = f.create_group(matname)
             except Exception as e:
                 print("rank=%d" % comm_rank, e, "group=%s exists" % matname)
                 h5g = f[matname]
-            if comm_rank == 0:
-                print('current idx: %d' %idx)
+            if comm_rank == 0 and bool(idx % 500):
+                print('time=%3.2f, idx= %d' %(time() - t, idx))
             simulate(h5g, cif_path, gpu_id=int(np.mod(comm_rank, 6)), clean_up=manual)
+    sim_t = time() - t
+    if comm_rank == 0:
+        print("took %3.3f seconds" % sim_t)    
 
 def main_test(cifdir_path):
     cifpath_list = get_cif_paths(cifdir_path)
