@@ -106,3 +106,9 @@ def sigma_int(V):
     sigma = 2*np.pi*(electron_mass*speed_of_light**2 + elementary_charge*V)/(2*electron_mass*speed_of_light**2 +
                                                                              elementary_charge*V)/(voltage2Lambda(V)*V)
     return sigma
+
+def cal_probe_size(Lambda, semi_angle,scherzer=False):
+    if scherzer:
+        pass #return 0.66 * Lambda**(3./4) * C_3**(1./4) # assumes Scherzer defocus
+    else: 
+        return 0.61 * Lambda / semi_angle

@@ -224,15 +224,27 @@ class MSA(object):
         bl_mask = np.heaviside(max(arr_shape[0], arr_shape[1]) * radius - r_grid, 0)
         return bl_mask.astype(np.float32)
 
-    def generate_probe_positions(self, probe_step=np.array([0.1, 0.1]), probe_range=np.array([[0., 1.0], [0., 1.0]])):
-        grid_steps_x, grid_steps_y = np.floor(np.diff(probe_range).flatten() * self.dims[:2] / probe_step).astype(np.int)
-        grid_range_x, grid_range_y = [(probe_range[i] - np.ones((2,)) * 0.5) * self.dims[i]
-                                      for i in range(2)]
-        y_pos, x_pos = np.mgrid[grid_range_y[0]: grid_range_y[1]: -1j * grid_steps_y,
-                       grid_range_x[0]: grid_range_x[1]: -1j * grid_steps_x]
+    def generate_probe_positions(self, probe_step=np.array([0.1, 0.1]), probe_range=np.array([[0., 1.0], [0., 1.0]]), grid_steps=None):
+        if grid_steps is not None:
+            grid_range_start = (0.5 - self.dims[:2]/2)/2
+            grid_range_stop = (0.5 + self.dims[:2]/2)/2
+            x_pos, y_pos = np.mgrid[grid_range_start[0]:grid_range_stop[0]:-1j*grid_steps[0], 
+                                    grid_range_start[1]:grid_range_stop[1]:-1j*grid_steps[1]]
+            grid_steps_x, grid_steps_y = np.floor_divide(grid_steps, 2)  
+            grid_range_x = np.array([grid_range_start[0], grid_range_stop[0]])
+            grid_range_y = np.array([grid_range_start[1], grid_range_stop[1]])
+        else:                            
+            grid_steps_x, grid_steps_y = np.floor(np.diff(probe_range).flatten() * self.dims[:2] / probe_step).astype(np.int)
+            grid_range_x, grid_range_y = [(probe_range[i] - np.ones((2,)) * 0.5) * self.dims[i]
+                                        for i in range(2)]
+            y_pos, x_pos = np.mgrid[grid_range_y[0]: grid_range_y[1]: -1j * grid_steps_y,
+                        grid_range_x[0]: grid_range_x[1]: -1j * grid_steps_x]
         probe_pos = np.array([[y, -x] for y, x in zip(y_pos.flatten()[::-1], x_pos.flatten())])
+        self.grid_steps = np.array([grid_steps_x, grid_steps_y])
+        self.grid_range = np.array([grid_range_x, grid_range_y]).flatten()
         self.probe_positions = probe_pos
-
+        self.num_probes = np.int32(probe_pos.shape[0])
+       
     def multislice(self, probe_pos=np.array([0., 0.]), probe_grid=True, save_probes=True, bandwidth=1 / 3):
         # check for slices
         if isinstance(self.potential_slices, np.ndarray) is False:
@@ -326,8 +338,11 @@ class MSAHybrid(MSA):
         import atexit
         def _clean_up():
             global ctx
-            ctx.pop()
-            ctx = None
+            if ctx is not None:
+                #global ctx
+                ctx.pop()
+                ctx.detach()
+                ctx = None
             from pycuda.tools import clear_context_caches
             clear_context_caches()
 
@@ -600,17 +615,17 @@ class MSAGPU(MSAHybrid):
         #self.psi_k.unregister()
         #self.psi.unregister()
 
-    def generate_probe_positions(self, probe_step=np.array([0.1, 0.1]), probe_range=np.array([[0., 1.0], [0., 1.0]])):
-        grid_steps_x, grid_steps_y = np.floor(np.diff(probe_range).flatten() * self.dims[:2] / probe_step).astype(np.int)
-        grid_range_x, grid_range_y = [(probe_range[i] - np.ones((2,)) * 0.5) * self.dims[i]
-                                      for i in range(2)]
-        y_pos, x_pos = np.mgrid[grid_range_y[0]: grid_range_y[1]: -1j * grid_steps_y,
-                       grid_range_x[0]: grid_range_x[1]: -1j * grid_steps_x]
-        probe_pos = np.array([[y, -x] for y, x in zip(y_pos.flatten()[::-1], x_pos.flatten())])
-        self.grid_steps = np.array([grid_steps_x, grid_steps_y])
-        self.grid_range = np.array([grid_range_x, grid_range_y]).flatten()
-        self.probe_positions = probe_pos
-        self.num_probes = np.int32(probe_pos.shape[0])
+    # def generate_probe_positions(self, probe_step=np.array([0.1, 0.1]), probe_range=np.array([[0., 1.0], [0., 1.0]])):
+    #     grid_steps_x, grid_steps_y = np.floor(np.diff(probe_range).flatten() * self.dims[:2] / probe_step).astype(np.int)
+    #     grid_range_x, grid_range_y = [(probe_range[i] - np.ones((2,)) * 0.5) * self.dims[i]
+    #                                   for i in range(2)]
+    #     y_pos, x_pos = np.mgrid[grid_range_y[0]: grid_range_y[1]: -1j * grid_steps_y,
+    #                    grid_range_x[0]: grid_range_x[1]: -1j * grid_steps_x]
+    #     probe_pos = np.array([[y, -x] for y, x in zip(y_pos.flatten()[::-1], x_pos.flatten())])
+    #     self.grid_steps = np.array([grid_steps_x, grid_steps_y])
+    #     self.grid_range = np.array([grid_range_x, grid_range_y]).flatten()
+    #     self.probe_positions = probe_pos
+    #     self.num_probes = np.int32(probe_pos.shape[0])
 
     @staticmethod
     def _get_blockgrid(shapes, mode='2D'):
