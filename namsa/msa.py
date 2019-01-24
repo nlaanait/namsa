@@ -233,13 +233,15 @@ class MSA(object):
             grid_steps_x, grid_steps_y = np.floor_divide(grid_steps, 2)  
             grid_range_x = np.array([grid_range_start[0], grid_range_stop[0]])
             grid_range_y = np.array([grid_range_start[1], grid_range_stop[1]])
+            probe_pos = np.array([[-x, y] for y, x in zip(y_pos.flatten()[::-1], x_pos.flatten())])
+
         else:                            
             grid_steps_x, grid_steps_y = np.floor(np.diff(probe_range).flatten() * self.dims[:2] / probe_step).astype(np.int)
             grid_range_x, grid_range_y = [(probe_range[i] - np.ones((2,)) * 0.5) * self.dims[i]
                                         for i in range(2)]
             y_pos, x_pos = np.mgrid[grid_range_y[0]: grid_range_y[1]: -1j * grid_steps_y,
                         grid_range_x[0]: grid_range_x[1]: -1j * grid_steps_x]
-        probe_pos = np.array([[y, -x] for y, x in zip(y_pos.flatten()[::-1], x_pos.flatten())])
+            probe_pos = np.array([[y, -x] for y, x in zip(y_pos.flatten()[::-1], x_pos.flatten())])
         self.grid_steps = np.array([grid_steps_x, grid_steps_y])
         self.grid_range = np.array([grid_range_x, grid_range_y]).flatten()
         self.probe_positions = probe_pos
@@ -350,14 +352,6 @@ class MSAHybrid(MSA):
         atexit.register(_clean_up)
         return ctx # return context in case of manual clean-up
 
-#     @staticmethod
-#     def clean_up(ctx):
-#         ctx.pop()
-#         ctx.detach()
-#         ctx = None
-#         from pycuda.tools import clear_context_caches
-#         clear_context_caches()
-        
     def plan_simulation(self, num_probes=None):
         if num_probes is None:
             num_probes = self.num_probes
