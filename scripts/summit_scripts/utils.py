@@ -34,7 +34,7 @@ def pop_DS(lst):
         if '.DS_Store' in itm:
             lst.pop(i)
 
-def get_cif_paths(root_path):
+def get_cif_paths(root_path, ratio=None):
     space_group_dirs = os.listdir(root_path)
     pop_DS(space_group_dirs)
     cifpath_list = []
@@ -44,6 +44,11 @@ def get_cif_paths(root_path):
         cif_paths = [os.path.join(os.path.join(root_path,spg_dir),cif_name) for cif_name in cif_list]
         cifpath_list.append(cif_paths)
     cifpath_list = list(chain.from_iterable(cifpath_list))
+    cifpath_list = np.array(cifpath_list)
+    np.random.shuffle(cifpath_list)
+    if ratio is not None:
+        test_size = int(cifpath_list.size * ratio)
+        return cifpath_list[:test_size], cifpath_list[test_size:]
     return cifpath_list 
 
 def parse_cif_path(cif_path):
@@ -80,7 +85,21 @@ def write_tfrecord(tfrecord_writer, cbed, potential, params):
     tfrecord_writer.write(example.SerializeToString()) 
     return
 
-def process_potential(pot_slices, mask=None, sampling=None):
+def write_lmdb(txn, idx, cbed, potential, params):
+    # barebone writing to file
+    key = bytes('potential_%s' %format(idx), "ascii")
+    sample = potential.flatten()
+    sample = sample.tostring()
+    txn.put(key, sample)
+    key = bytes('cbed_%s' %format(idx), "ascii")
+    sample = cbed.flatten()
+    sample = cbed.tostring()
+    txn.put(key, sample)
+    
+    # need to figure out how to write params for each sample
+    return
+
+def process_potential(pot_slices, mask=None, sampling=None, expand_dim=True, fp16=False):
     proj_potential = np.imag(pot_slices).sum(0)
     if mask is None:
         mask = np.ones((sampling, sampling), dtype=np.bool)
@@ -89,7 +108,15 @@ def process_potential(pot_slices, mask=None, sampling=None):
     else:
         mask = np.logical_not(mask)
     proj_potential[mask] = 0
+    if expand_dim:
+        proj_potential = np.expand_dims(proj_potential, axis=0)
+    if fp16:
+        return proj_potential.astype(np.float16)
     return proj_potential
+
+def process_cbed(cbed, fp16=False):
+    if fp16:
+        return cbed.astype(np.float16)
 
 def update_sim_params(sim_params, msa_cls=None, sp_cls=None):
     # msa params
