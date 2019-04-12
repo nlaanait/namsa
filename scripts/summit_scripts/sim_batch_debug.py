@@ -20,7 +20,10 @@ def simulate(filehandle, cif_path, idx= None, gpu_id=0, clean_up=False):
     spgroup_num, matname = parse_cif_path(cif_path)
     index = 1 
     sp = SupercellBuilder(cif_path, verbose=False, debug=False)
+    t = time()
     sim_params = get_sim_params(sp)
+    #if comm_rank == 0:
+    print('time to get params: %2.3f' %(time() - t))
     z_dir = sim_params['z_dirs'][index]
     y_dir = sim_params['y_dirs'][index]
     cell_dim = sim_params['cell_dim']
@@ -29,9 +32,11 @@ def simulate(filehandle, cif_path, idx= None, gpu_id=0, clean_up=False):
     sim_params['material'] = matname
     
     # build supercell
+    t = time()
     sp.build_unit_cell()
     sp.make_orthogonal_supercell(supercell_size=np.array([cell_dim,cell_dim,slab_t]),
                              projec_1=y_dir, projec_2=z_dir)
+    print('time to build cell : %2.3f' %(time() - t))
     
     # set simulation params
     slice_thickness = sim_params['d_hkl'][index]
@@ -42,6 +47,7 @@ def simulate(filehandle, cif_path, idx= None, gpu_id=0, clean_up=False):
     grid_steps = sim_params['grid_steps']
     
     # simulate
+    t = time()
     msa = MSAGPU(energy, semi_angle, sp.supercell_sites, sampling=sampling,
                  verbose=False, debug=False)
     ctx = msa.setup_device(gpu_rank=gpu_id)
@@ -49,8 +55,13 @@ def simulate(filehandle, cif_path, idx= None, gpu_id=0, clean_up=False):
     msa.build_potential_slices(slice_thickness)
     msa.build_probe(probe_dict=probe_params)
     msa.generate_probe_positions(grid_steps=grid_steps) 
+    #if comm_rank == 0:
+    print('time to create context + other sims inputs : %2.3f' % (time() - t))
+    t = time()
     msa.plan_simulation()
     msa.multislice()
+    #if comm_rank == 0:
+    print('time to simulate cbed : %2.3f' %(time() - t))
     
     # process cbed and potential
     mask = msa.bandwidth_limit_mask(sampling, radius=1./3).astype(np.bool)

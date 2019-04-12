@@ -1,6 +1,9 @@
 #!/bin/bash -l
-HOME="/gpfs/wolf/gen113/scratch/nl7/work"
-PYTHON=${HOME}/anaconda3 
-cd ${HOME}/MSA/namsa
-${PYTHON}/bin/python -u setup.py install
+BUILDS=${PROJWORK}/lrn001/nl/builds
+PYTHON=${BUILDS}/miniconda3
+export PATH=$PYTHON/bin:$PATH
+#conda install --name "tf1p12" matplotlib
+source activate "tf1p12" 
+cd namsa
+python -u setup.py install
 

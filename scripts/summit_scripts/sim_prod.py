@@ -2,17 +2,45 @@ from namsa import SupercellBuilder, MSAGPU
 from utils import *
 import numpy as np
 from time import time
-import sys, os, re
+import sys, os, re, subprocess, shlex
 import h5py
 from mpi4py import MPI
 from itertools import chain
 import tensorflow as tf
 import lmdb
+import numpy as np
 
 comm = MPI.COMM_WORLD
 comm_size = comm.Get_size()
 comm_rank = comm.Get_rank()
 
+def swap_out(lmdb_path):
+    # delete current lmdb dir
+    rm_args = "rm -r %s" % lmdb_path
+    rm_args = shlex.split(rm_args)
+    try:
+        subprocess.run(rm_args, check=True)
+    except subprocess.SubprocessError as e:
+        print("rank %d: %s" % (comm_rank, format(e)))
+
+    # replace with lmdb from repo
+    user = os.environ.get('USER')
+    lmdb_repo = "/gpfs/alpine/lrn001/proj-shared/nl/sims/data/lmdb_fix"
+    lmdb_repo_list = os.listdir(lmdb_repo)
+    index = np.random.randint(0, len(lmdb_repo_list))
+    lmdb_path_src = os.path.join(lmdb_repo, lmdb_repo_list[index])
+    if not os.path.exists(lmdb_path_src):
+        print('replacement file %s not found' % lmdb_path_src)
+        return
+    src = lmdb_path_src 
+    trg = lmdb_path 
+    cp_args = "cp -r %s %s" %(src, trg)
+    cp_args = shlex.split(cp_args)
+    if not os.path.exists(trg):
+        try:
+            subprocess.run(cp_args, check=True)
+        except subprocess.SubprocessError as e:
+            print("rank %d: %s" % (comm_rank, format(e)))
 
 
 def simulate(filehandle, cif_path, idx= None, gpu_id=0, clean_up=False):
@@ -89,12 +117,13 @@ def simulate(filehandle, cif_path, idx= None, gpu_id=0, clean_up=False):
             msa.clean_up(ctx=None, vars=msa.vars)
         return True
 
-def main(cifdir_path, outdir_path, save_mode="h5"):
+def generate_eval_data(cifpaths, outdir_path, save_mode="h5", runtime=1800*0.9):
     t = time()
-    cifpaths = get_cif_paths(cifdir_path)
     batch_num, _ = np.divmod(comm_rank, 6)
     num_sims = cifpaths.size
-    num_sims = comm_size * 2 
+    #num_sims = comm_size * 5
+    if comm_rank == 0:
+        print('simulating evaluation data')
     if save_mode == "h5": 
     # HDF5
         h5path = os.path.join(outdir_path, 'batch_%d.h5'% comm_rank)
@@ -143,22 +172,27 @@ def main(cifdir_path, outdir_path, save_mode="h5"):
         env = lmdb.open(lmdbpath, map_size=int(100e9), map_async=True, writemap=True, create=True) # max of 100 GB
         with env.begin(write=True) as txn:
             fail = 0
+            success = 0
             for (idx, cif_path) in enumerate(cifpaths[comm_rank:num_sims:comm_size]):
                 manual = idx < ( num_sims - comm_size) 
                 spgroup_num, matname = parse_cif_path(cif_path)
                 if comm_rank == 0 and bool(idx % 500):
                     print('time=%3.2f, num_sims= %d' %(time() - t, idx * comm_size))
-                try:
-                    status = simulate(txn, cif_path, idx=idx-fail, gpu_id=int(np.mod(comm_rank, 6)), clean_up=manual)
-                    if status:
-                        print('rank=%d, finished simulation=%s' % (comm_rank, cif_path))
-                        env.sync()
-                    else:
-                        print("rank=%d, skipped simulation=%s, error=NaN" % (comm_rank, cif_path))
+                if (time() - t_elaps) < runtime:
+                    try:
+                        status = simulate(txn, cif_path, idx=idx-fail, gpu_id=int(np.mod(comm_rank, 6)), clean_up=manual)
+                        if status:
+                            print('rank=%d, finished simulation=%s' % (comm_rank, cif_path))
+                            env.sync()
+                            success += 1
+                        else:
+                            print("rank=%d, skipped simulation=%s, error=NaN" % (comm_rank, cif_path))
+                            fail += 1
+                    except Exception as e:
+                        print("rank=%d, skipped simulation=%s, error=%s" % (comm_rank, cif_path, format(e)))
                         fail += 1
-                except Exception as e:
-                    print("rank=%d, skipped simulation=%s, error=%s" % (comm_rank, cif_path, format(e)))
-                    fail += 1
+                else:
+                    break
             # write lmdb headers
             headers = {b"input_dtype": bytes('float16', "ascii"),
                        b"input_shape": np.array([1024,512,512]).tostring(),
@@ -167,6 +201,8 @@ def main(cifdir_path, outdir_path, save_mode="h5"):
             for key, val in headers.items():
                 txn.put(key, val)
             env.sync()
+        if success < 4:
+            swap_out(lmdbpath)
 
     #comm.Barrier()            
     # time the simulation run        
@@ -174,18 +210,120 @@ def main(cifdir_path, outdir_path, save_mode="h5"):
     if comm_rank == 0:
         print("took %3.3f seconds" % sim_t)    
 
-def main_test(cifdir_path):
-    cifpaths_train, cifpaths_test= get_cif_paths(cifdir_path, ratio=0.2)
-    print("train", cifpaths_train[:10])
-    print("test", cifpaths_test[:10])
+def generate_training_data(cifpaths, outdir_path, save_mode="h5", runtime=1800*0.7):
+    t = time()
+    batch_num, _ = np.divmod(comm_rank, 6)
+    num_sims = cifpaths.size
+    #num_sims = comm_size * 5 
+    if comm_rank == 0:
+        print('simulating training data')
+    if save_mode == "h5": 
+    # HDF5
+        h5path = os.path.join(outdir_path, 'batch_%d.h5'% comm_rank)
+        if os.path.exists(h5path):
+            mode ='r+'
+        else:
+            mode ='w'
+        with h5py.File(h5path, mode=mode) as f:
+            for (idx, cif_path) in enumerate(cifpaths[comm_rank:num_sims:comm_size]):
+                manual = idx < ( num_sims - comm_size) 
+                spgroup_num, matname = parse_cif_path(cif_path)
+                try:
+                    h5g = f.create_group(matname)
+                except Exception as e:
+                    print("rank=%d" % comm_rank, e, "group=%s exists" % matname)
+                    h5g = f[matname]
+                if comm_rank == 0 and bool(idx % 500):
+                    print('time=%3.2f, num_sims= %d' %(time() - t, idx * comm_size))
                 
+                try: 
+                    simulate(h5g, cif_path, gpu_id=int(np.mod(comm_rank, 6)), clean_up=manual)
+                    print('rank=%d, finished simulation=%s' % (comm_rank, cif_path))
+                except Exception as e:
+                    print("rank=%d, skipped simulation=%s, error=%s" % (comm_rank, cif_path, format(e)))
+    # TFRECORDS 
+    elif save_mode == "tfrecord":
+        tfrecpath = os.path.join(outdir_path, 'batch_%d.tfrecords'% comm_rank)   
+        with tf.python_io.TFRecordWriter(tfrecpath) as tfrec:
+            for (idx, cif_path) in enumerate(cifpaths[comm_rank:num_sims:comm_size]):
+                manual = idx < ( num_sims - comm_size) 
+                spgroup_num, matname = parse_cif_path(cif_path)
+                if comm_rank == 0 and bool(idx % 500):
+                    print('time=%3.2f, num_sims= %d' %(time() - t, idx * comm_size))
+                try: 
+                    status = simulate(tfrec, cif_path, gpu_id=int(np.mod(comm_rank, 6)), clean_up=manual)
+                    if status:
+                        print('rank=%d, finished simulation=%s' % (comm_rank, cif_path))
+                    else:
+                        print("rank=%d, skipped simulation=%s, error=NaN" % (comm_rank, cif_path))
+                except Exception as e:
+                    print("rank=%d, skipped simulation=%s, error=%s" % (comm_rank, cif_path, format(e)))
+
+    # LMDB            
+    elif save_mode == "lmdb":
+        lmdbpath = os.path.join(outdir_path, 'batch_train_%d.db' % comm_rank)
+        env = lmdb.open(lmdbpath, map_size=int(100e9), map_async=True, writemap=True, create=True) # max of 100 GB
+        with env.begin(write=True) as txn:
+            fail = 0
+            success = 0
+            for (idx, cif_path) in enumerate(cifpaths[comm_rank:num_sims:comm_size]):
+                manual = idx < ( num_sims - comm_size) 
+                spgroup_num, matname = parse_cif_path(cif_path)
+                if comm_rank == 0 and bool(idx % 500):
+                    print('time=%3.2f, num_sims= %d' %(time() - t, idx * comm_size))
+
+                if (time() - t_elaps) < runtime:
+                    try:
+                        status = simulate(txn, cif_path, idx=idx-fail, gpu_id=int(np.mod(comm_rank, 6)), clean_up=manual)
+                        if status:
+                            print('rank=%d, finished simulation=%s' % (comm_rank, cif_path))
+                            env.sync()
+                            success += 1
+                        else:
+                            print("rank=%d, skipped simulation=%s, error=NaN" % (comm_rank, cif_path))
+                            fail += 1
+                    except Exception as e:
+                        print("rank=%d, skipped simulation=%s, error=%s" % (comm_rank, cif_path, format(e)))
+                        fail += 1
+                else: 
+                    break
+            # write lmdb headers
+            headers = {b"input_dtype": bytes('float16', "ascii"),
+                       b"input_shape": np.array([1024,512,512]).tostring(),
+                       b"output_shape": np.array([1,512,512]).tostring(),
+                       b"output_dtype": bytes('float16', "ascii")}
+            for key, val in headers.items():
+                txn.put(key, val)
+            env.sync()
+        if success < 4:
+            swap_out(lmdbpath)
+
+    #comm.Barrier()            
+    # time the simulation run        
+    sim_t = time() - t
+    if comm_rank == 0:
+        print("took %3.3f seconds" % sim_t)    
+
+def main(cifdir_path, outdir_path, save_mode, runtime=1800):
+    global t_elaps
+    t_elaps = time()
+    cifpaths_train, cifpaths_eval= get_cif_paths(cifdir_path, ratio=0.2)
+    generate_training_data(cifpaths_train, outdir_path, save_mode=save_mode, runtime=runtime*0.7)
+    generate_eval_data(cifpaths_eval, outdir_path, save_mode=save_mode, runtime=runtime*0.9)
+    return
+
 if __name__ == "__main__":
+    start_time = time()
     if len(sys.argv) > 2:
-        cifdir_path, outdir_path, save_mode = sys.argv[-3:]
+        cifdir_path, outdir_path, save_mode, runtime  = sys.argv[-4:]
         if save_mode not in ["h5", "tfrecord", "lmdb"]:
             print("saving format not of h5, tfrecord, lmdb")
             sys.exit()
-        main(cifdir_path, outdir_path, save_mode)
+        main(cifdir_path, outdir_path, save_mode, runtime=int(runtime))
+        #comm.Barrier()
+        if comm_rank == 0:
+            print('Spent %2.4f s in simulation' %(time() - start_time))
+        sys.exit()
     elif len(sys.argv) == 2:
         cifdir_path = sys.argv[-1]
         main_test(cifdir_path)

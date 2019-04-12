@@ -5,6 +5,7 @@ from namsa.scattering import get_kinematic_reflection, get_cell_orientation, ove
 from namsa.optics import voltage2Lambda
 import tensorflow as tf
 import h5py
+from scipy.ndimage import gaussian_filter
 
 def _bytes_feature(value):
     return tf.train.Feature(bytes_list=tf.train.BytesList(value=[value]))
@@ -47,8 +48,8 @@ def get_cif_paths(root_path, ratio=None):
     cifpath_list = np.array(cifpath_list)
     np.random.shuffle(cifpath_list)
     if ratio is not None:
-        test_size = int(cifpath_list.size * ratio)
-        return cifpath_list[:test_size], cifpath_list[test_size:]
+        train_size = int(cifpath_list.size * ratio)
+        return cifpath_list[:train_size], cifpath_list[train_size:]
     return cifpath_list 
 
 def parse_cif_path(cif_path):
@@ -85,7 +86,7 @@ def write_tfrecord(tfrecord_writer, cbed, potential, params):
     tfrecord_writer.write(example.SerializeToString()) 
     return
 
-def write_lmdb(txn, idx, cbed, potential, params):
+def write_lmdb(txn, idx, cbed, potential, params=None):
     # barebone writing to file
     key = bytes('potential_%s' %format(idx), "ascii")
     sample = potential.flatten()
@@ -99,24 +100,44 @@ def write_lmdb(txn, idx, cbed, potential, params):
     # need to figure out how to write params for each sample
     return
 
-def process_potential(pot_slices, mask=None, sampling=None, expand_dim=True, fp16=False):
-    proj_potential = np.imag(pot_slices).sum(0)
-    if mask is None:
-        mask = np.ones((sampling, sampling), dtype=np.bool)
-        snapshot = slice(int(proj_potential.shape[0]// 4), int(3 * proj_potential.shape[1]//4))
-        mask[snapshot, snapshot] = False
-    else:
-        mask = np.logical_not(mask)
-    proj_potential[mask] = 0
-    if expand_dim:
-        proj_potential = np.expand_dims(proj_potential, axis=0)
-    if fp16:
-        return proj_potential.astype(np.float16)
+def process_potential(pot_slices, normalize=True, mask=None, sampling=None, scale=[0,1], expand_dim=True, fp16=False):
+    proj_potential = np.imag(pot_slices).mean(0)
+    proj_potential = gaussian_filter(proj_potential,1.2)
+    #if mask is None:
+    #    pass
+        #mask = np.ones((sampling, sampling), dtype=np.bool)
+        #snapshot = slice(int(proj_potential.shape[0]// 4), int(3 * proj_potential.shape[1]//4))
+        #mask[snapshot, snapshot] = False
+    #else:
+    #    mask = np.logical_not(mask)
+    #    proj_potential[mask] = 0
+    proj_potential = (proj_potential - proj_potential.mean())/max(proj_potential.std(), 1./np.sqrt(proj_potential.size)) 
+    proj_potential = proj_potential - proj_potential.min()
+    #proj_potential = (proj_potential - proj_potential.min())/(proj_potential.max() - proj_potential.min())
+    #proj_potential = proj_potential * (scale[-1] - scale[0]) + scale[0]
+    proj_potential = np.expand_dims(proj_potential, axis=0)
+    proj_potential = proj_potential.astype(np.float16)
+    #if normalize:
+    #    proj_potential = (proj_potential - proj_potential.mean())/max(proj_potential.std(), 1./np.sqrt(proj_potential.size)) 
+    #if expand_dim:
+    #    proj_potential = np.expand_dims(proj_potential, axis=0)
+    #if fp16:
+    #    return proj_potential.astype(np.float16)
     return proj_potential
 
-def process_cbed(cbed, fp16=False):
-    if fp16:
-        return cbed.astype(np.float16)
+def process_cbed(cbed, normalize=True, scale=[-1, 1], fp16=False):
+    cbed = np.sqrt(cbed)
+    #cbed = cbed ** (1./3)
+    cbed = (cbed - cbed.mean())/max(cbed.std(), 1./np.sqrt(cbed[0].size)) 
+    #cbed = (cbed - np.min(cbed, axis=(1,-1), keepdims=True))/(np.max(cbed, axis=(1,-1), keepdims=True) - np.min(cbed, axis=(1,-1), keepdims=True))
+    #cbed = cbed * (scale[-1] - scale[0]) + scale[0]
+    cbed = cbed.astype(np.float16)
+    #if normalize:
+    #    cbed = cbed ** (1/3)
+    #    cbed = (cbed - cbed.mean())/max(cbed.std(), 1./np.sqrt(cbed[0].size)) 
+    #if fp16:
+    #    return cbed.astype(np.float16)
+    return cbed
 
 def update_sim_params(sim_params, msa_cls=None, sp_cls=None):
     # msa params

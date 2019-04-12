@@ -1,0 +1,46 @@
+#!/bin/bash -l
+#BSUB -P LRN001 
+#BSUB -J namsa 
+#BSUB -o logs.o%J
+#BSUB -W 00:30
+#BSUB -nnodes 16 
+#BSUB -alloc_flags "smt4 nvme maximizegpfs"
+#BSUB -q batch
+##BSUB -N
+##BSUB -csm y
+##BSUB -alloc_flags "smt4 gpumps nvme"
+
+NODES=$(cat ${LSB_DJOB_HOSTFILE} | sort | uniq | grep -v login | grep -v batch | wc -l)
+BUILDS=${PROJWORK}/lrn001/nl/builds
+
+### modules ###
+module unload darshan-runtime
+module load gcc/6.4.0
+module load fftw hdf5 cuda
+
+### python ###
+PYTHON=${BUILDS}/miniconda3
+export PATH=$PYTHON/bin:$PATH 
+export PYTHONIOENCODING="utf8"
+export LD_LIBRARY_PATH=${PYTHON}/lib:$LD_LIBRARY_PATH
+#CONDA_ENV_NAME="torch1p0"
+CONDA_ENV_NAME="tf1p12"
+source activate $CONDA_ENV_NAME
+echo $(which python)
+
+LOG="$(pwd)/output_${LSB_JOBID}.log"
+
+### namsa ###
+CIFDIR="$(pwd)/data/materialsgenomics"
+#SAVEDIR="$(pwd)/data/h5_files"
+SAVEDIR="$(pwd)/data/lmdb_test"
+#SAVEDIR="$(pwd)/data/tfrecords"
+#SAVEDIR="/mnt/bb/${USER}"
+#SAVEMODE="tfrecord"
+#SAVEMODE="h5"
+SAVEMODE="lmdb"
+export PYCUDA_DISABLE_CACHE=1
+EXEC="python -W ignore -u sim_batch_debug.py $CIFDIR $SAVEDIR $SAVEMODE"
+   
+### run ###
+jsrun -n${NODES} -a6 -c42 -g6 -r1 --bind=proportional-packed:7 --launch_distribution=packed ${EXEC} > $LOG 
