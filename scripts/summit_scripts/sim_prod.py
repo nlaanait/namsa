@@ -46,7 +46,7 @@ def swap_out(lmdb_path):
 def simulate(filehandle, cif_path, idx= None, gpu_id=0, clean_up=False):
     # load cif and get sim params
     spgroup_num, matname = parse_cif_path(cif_path)
-    index = 1 
+    index = 0 
     sp = SupercellBuilder(cif_path, verbose=False, debug=False)
     sim_params = get_sim_params(sp)
     z_dir = sim_params['z_dirs'][index]
@@ -307,9 +307,9 @@ def generate_training_data(cifpaths, outdir_path, save_mode="h5", runtime=1800*0
 def main(cifdir_path, outdir_path, save_mode, runtime=1800):
     global t_elaps
     t_elaps = time()
-    cifpaths_train, cifpaths_eval= get_cif_paths(cifdir_path, ratio=0.2)
-    generate_training_data(cifpaths_train, outdir_path, save_mode=save_mode, runtime=runtime*0.7)
-    generate_eval_data(cifpaths_eval, outdir_path, save_mode=save_mode, runtime=runtime*0.9)
+    cifpaths_train, cifpaths_eval= get_cif_paths(cifdir_path, ratio=0.9)
+    generate_training_data(cifpaths_train, outdir_path, save_mode=save_mode, runtime=runtime*0.9)
+    generate_eval_data(cifpaths_eval, outdir_path, save_mode=save_mode, runtime=runtime)
     return
 
 if __name__ == "__main__":

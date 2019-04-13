@@ -48,6 +48,6 @@ def main(lmdb_dir, delete=False):
 
 if __name__ == "__main__":
     if len(sys.argv) == 3:
-        main(sys.argv[-2], delete=bool(sys.argv[-1]))
+        main(sys.argv[-2], delete=bool(int(sys.argv[-1])))
     else:
         main(sys.argv[-1])

@@ -6,6 +6,7 @@ from namsa.optics import voltage2Lambda
 import tensorflow as tf
 import h5py
 from scipy.ndimage import gaussian_filter
+from skimage.transform import resize
 
 def _bytes_feature(value):
     return tf.train.Feature(bytes_list=tf.train.BytesList(value=[value]))
@@ -103,6 +104,9 @@ def write_lmdb(txn, idx, cbed, potential, params=None):
 def process_potential(pot_slices, normalize=True, mask=None, sampling=None, scale=[0,1], expand_dim=True, fp16=False):
     proj_potential = np.imag(pot_slices).mean(0)
     proj_potential = gaussian_filter(proj_potential,1.2)
+    snapshot = slice(int(proj_potential.shape[0]// 4), int(3 * proj_potential.shape[1]//4))
+    proj_potential = proj_potential[snapshot, snapshot]
+    proj_potential = resize(proj_potential,(512, 512), preserve_range=True, mode='constant', order=4)
     #if mask is None:
     #    pass
         #mask = np.ones((sampling, sampling), dtype=np.bool)

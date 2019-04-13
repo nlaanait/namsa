@@ -27,7 +27,7 @@ def simulate(filehandle, cif_path, idx= None, gpu_id=0, clean_up=False):
     sim_params['space_group']= spgroup_num
     sim_params['material'] = matname
     energies = [100e3, 125e3, 150e3, 175e3, 200e3]
-    for (sample_idx, y_dir, (z_idx, z_dir), energy) in enumerate(product(y_dirs, enumerate(z_dirs), energies)):
+    for (sample_idx, (y_dir, (z_idx, z_dir), energy)) in enumerate(product(y_dirs, enumerate(z_dirs), energies)):
         try:
             t = time()
             # build supercell

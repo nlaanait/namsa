@@ -25,24 +25,24 @@ def swap_out(lmdb_path):
     except subprocess.SubprocessError as e:
         print("rank %d: %s" % (comm_rank, format(e)))
 
-    # replace with lmdb from repo
-    user = os.environ.get('USER')
-    lmdb_repo = "/gpfs/alpine/lrn001/proj-shared/nl/sims/data/lmdb_bank_0405_3096"
-    lmdb_repo_list = os.listdir(lmdb_repo)
-    index = np.random.randint(0, len(lmdb_repo_list))
-    lmdb_path_src = os.path.join(lmdb_repo, lmdb_repo_list[index])
-    if not os.path.exists(lmdb_path_src):
-        print('replacement file %s not found' % lmdb_path_src)
-        return
-    src = lmdb_path_src 
-    trg = lmdb_path 
-    cp_args = "cp -r %s %s" %(src, trg)
-    cp_args = shlex.split(cp_args)
-    if not os.path.exists(trg):
-        try:
-            subprocess.run(cp_args, check=True)
-        except subprocess.SubprocessError as e:
-            print("rank %d: %s" % (comm_rank, format(e)))
+    ## replace with lmdb from repo
+    #user = os.environ.get('USER')
+    #lmdb_repo = "/gpfs/alpine/lrn001/proj-shared/nl/sims/data/lmdb_bank_0405_3096"
+    #lmdb_repo_list = os.listdir(lmdb_repo)
+    #index = np.random.randint(0, len(lmdb_repo_list))
+    #lmdb_path_src = os.path.join(lmdb_repo, lmdb_repo_list[index])
+    #if not os.path.exists(lmdb_path_src):
+    #    print('replacement file %s not found' % lmdb_path_src)
+    #    return
+    #src = lmdb_path_src 
+    #trg = lmdb_path 
+    #cp_args = "cp -r %s %s" %(src, trg)
+    #cp_args = shlex.split(cp_args)
+    #if not os.path.exists(trg):
+    #    try:
+    #        subprocess.run(cp_args, check=True)
+    #    except subprocess.SubprocessError as e:
+    #        print("rank %d: %s" % (comm_rank, format(e)))
 
 
 def simulate(filehandle, h5g, idx= None, gpu_id=0, clean_up=False):
@@ -63,6 +63,21 @@ def simulate(filehandle, h5g, idx= None, gpu_id=0, clean_up=False):
 
         # build supercell
         sp = SupercellBuilder(cif_path, verbose=False, debug=False)
+        # filter out 
+        angles = np.array(sp.structure.lattice.angles)
+        angles = np.round(angles).astype(np.int)
+        cutoff = np.array([90,90,90])
+        tol = 2
+        cubic_cond = np.logical_not(np.logical_and(angles > cutoff - tol, angles < cutoff + tol)).any()
+        hexag_cond_1 = np.logical_and(angles[:2] > cutoff[:2] - tol, angles[:2] < cutoff[:2] + tol).any()
+        hexag_cond_2 = np.logical_and(angles[-1] > 120 - tol, angles[-1] < 120 + tol)
+        hexag_cond = np.logical_not(hexag_cond_1 and hexag_cond_2)
+        if cubic_cond:
+            if hexag_cond:
+                return False
+            else:
+                pass
+
         sp.build_unit_cell()
         sp.make_orthogonal_supercell(supercell_size=np.array([cell_dim,cell_dim,slab_t]),
                              projec_1=y_dir, projec_2=z_dir)
