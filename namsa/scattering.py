@@ -8,6 +8,8 @@ def get_kinematic_reflection(unit_cell, top=3):
     xrd = XRDCalculator().get_pattern(unit_cell)
     hkls = np.array([list(itm.keys())[0] for itm in xrd.hkls])
     intens = xrd.y
+    if top > intens.size:
+        top = intens.size 
     top_ind = np.argsort(intens)[::-1][:top]
     hkl_vecs = hkls[top_ind]
     d_hkls = np.array(xrd.d_hkls)[top_ind]

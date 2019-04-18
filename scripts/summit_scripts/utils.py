@@ -87,13 +87,13 @@ def write_tfrecord(tfrecord_writer, cbed, potential, params):
     tfrecord_writer.write(example.SerializeToString()) 
     return
 
-def write_lmdb(txn, idx, cbed, potential, params=None):
+def write_lmdb(txn, idx, cbed, potential, record_names=["2d_potential_", "cbed_"], params=None):
     # barebone writing to file
-    key = bytes('potential_%s' %format(idx), "ascii")
+    key = bytes('%s%s' %(record_names[0],format(idx)), "ascii")
     sample = potential.flatten()
     sample = sample.tostring()
     txn.put(key, sample)
-    key = bytes('cbed_%s' %format(idx), "ascii")
+    key = bytes('%s%s' %(record_names[1],format(idx)), "ascii")
     sample = cbed.flatten()
     sample = cbed.tostring()
     txn.put(key, sample)
@@ -101,12 +101,12 @@ def write_lmdb(txn, idx, cbed, potential, params=None):
     # need to figure out how to write params for each sample
     return
 
-def process_potential(pot_slices, normalize=True, mask=None, sampling=None, scale=[0,1], expand_dim=True, fp16=False):
+def process_potential(pot_slices, normalize=True, mask=None, sampling=None, scale=[-1,1], expand_dim=True, fp16=False):
     proj_potential = np.imag(pot_slices).mean(0)
     proj_potential = gaussian_filter(proj_potential,1.2)
     snapshot = slice(int(proj_potential.shape[0]// 4), int(3 * proj_potential.shape[1]//4))
     proj_potential = proj_potential[snapshot, snapshot]
-    proj_potential = resize(proj_potential,(512, 512), preserve_range=True, mode='constant', order=4)
+    proj_potential = resize(proj_potential,sampling, preserve_range=True, mode='constant', order=4)
     #if mask is None:
     #    pass
         #mask = np.ones((sampling, sampling), dtype=np.bool)
@@ -116,7 +116,7 @@ def process_potential(pot_slices, normalize=True, mask=None, sampling=None, scal
     #    mask = np.logical_not(mask)
     #    proj_potential[mask] = 0
     proj_potential = (proj_potential - proj_potential.mean())/max(proj_potential.std(), 1./np.sqrt(proj_potential.size)) 
-    proj_potential = proj_potential - proj_potential.min()
+    #proj_potential = proj_potential - proj_potential.min()
     #proj_potential = (proj_potential - proj_potential.min())/(proj_potential.max() - proj_potential.min())
     #proj_potential = proj_potential * (scale[-1] - scale[0]) + scale[0]
     proj_potential = np.expand_dims(proj_potential, axis=0)
@@ -130,9 +130,9 @@ def process_potential(pot_slices, normalize=True, mask=None, sampling=None, scal
     return proj_potential
 
 def process_cbed(cbed, normalize=True, scale=[-1, 1], fp16=False):
-    cbed = np.sqrt(cbed)
+    #cbed = np.sqrt(cbed)
     #cbed = cbed ** (1./3)
-    cbed = (cbed - cbed.mean())/max(cbed.std(), 1./np.sqrt(cbed[0].size)) 
+    cbed = (cbed - np.mean(cbed, axis=(1,-1), keepdims=True))/np.std(cbed, axis=(1,-1), keepdims=True)
     #cbed = (cbed - np.min(cbed, axis=(1,-1), keepdims=True))/(np.max(cbed, axis=(1,-1), keepdims=True) - np.min(cbed, axis=(1,-1), keepdims=True))
     #cbed = cbed * (scale[-1] - scale[0]) + scale[0]
     cbed = cbed.astype(np.float16)
@@ -195,3 +195,9 @@ def get_sim_params(sp_cell, slab_t= 200, sampling=np.array([512,512]), d_cutoff=
                 'aberration_dict':{'C1':0., 'C3':0 , 'C5':0.}, 'spherical_phase': True}
     return sim_params
 
+def get_slice_thickness(sp_cell, direc=np.array([0,0,1])):
+    hkls, dhkls = get_kinematic_reflection(sp_cell.structure,top=10)
+    if hkls[0].size > 3: # hexagonal systems    
+        hkls = np.array([[itm[0], itm[1], itm[-1]] for itm in hkls])
+    idx = np.argmin(np.abs(np.cross(hkls,direc).sum(1)))
+    return dhkls[idx]

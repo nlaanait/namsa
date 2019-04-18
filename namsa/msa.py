@@ -341,10 +341,13 @@ class MSAHybrid(MSA):
         def _clean_up():
             global ctx
             if ctx is not None:
-                #global ctx
-                ctx.pop()
-                ctx.detach()
-                ctx = None
+                try:#global ctx
+                    #ctx.push()
+                    ctx.pop()
+                    ctx.detach()
+                    #ctx = None
+                except:
+                    pass
             from pycuda.tools import clear_context_caches
             clear_context_caches()
 
