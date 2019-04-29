@@ -19,14 +19,14 @@ def simulate(filehandle, cif_path, idx= None, gpu_id=0, clean_up=False):
     # load cif and get sim params
     spgroup_num, matname = parse_cif_path(cif_path)
     sp = SupercellBuilder(cif_path, verbose=False, debug=False)
-    sim_params = get_sim_params(sp, grid_steps=np.array([2,2]), orientation_num=20)
+    sim_params = get_sim_params(sp, grid_steps=np.array([2,2]), orientation_num=3)
     z_dirs = sim_params['z_dirs']
     y_dirs = sim_params['y_dirs']
     cell_dim = sim_params['cell_dim']
     slab_t = sim_params['slab_t']
     sim_params['space_group']= spgroup_num
     sim_params['material'] = matname
-    energies = [100e3, 125e3, 150e3, 175e3, 200e3]
+    energies = [100, 125, 150, 175, 200]
     for (sample_idx, (y_dir, (z_idx, z_dir), energy)) in enumerate(product(y_dirs, enumerate(z_dirs), energies)):
         try:
             t = time()
