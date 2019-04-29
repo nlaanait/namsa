@@ -54,8 +54,8 @@ def get_cell_orientation(vec):
     def func(x):
         return np.abs(np.dot(vec,x))
     res = minimize(func, np.array([-1,1,-1]), method='CG')
-    if np.abs(res.x.sum()) < 1e-4:
-        return np.array([0,0,1])
+    if np.sum(np.abs(res.x)) < 1e-4:
+        return np.array([1,0,0]) 
     return res.x
     
 
@@ -170,7 +170,7 @@ def update_sim_params(sim_params, msa_cls=None, sp_cls=None):
             sim_params['angles'] = str(e)
     return sim_params
 
-def get_sim_params(sp_cell, slab_t= 200, sampling=np.array([512,512]), d_cutoff=4, grid_steps=np.array([32, 32]),
+def get_sim_params(sp_cell, slab_t= 100, sampling=np.array([512,512]), d_cutoff=4, grid_steps=np.array([32, 32]),
                    cell_dim = 100, energy=100e3, orientation_num=3, beam_overlap=1):
     """
     return a dict object to set params of simulation and write to h5.
@@ -178,12 +178,16 @@ def get_sim_params(sp_cell, slab_t= 200, sampling=np.array([512,512]), d_cutoff=
     sim_params= dict()
     
     # scattering params
-    hkls, dhkls = get_kinematic_reflection(sp_cell.structure, top=orientation_num)
+    hkls, dhkls = get_kinematic_reflection(sp_cell.structure, top=3)
     if hkls[0].size > 3: # hexagonal systems    
         hkls = np.array([[itm[0], itm[1], itm[-1]] for itm in hkls])
     cutoff = np.logical_and(dhkls < 5., dhkls > 1.) # not considering less than 5 ang. d-spacing
-#     if dhkls[cutoff].size > 1:
-    hkls, dhkls = hkls[cutoff], dhkls[cutoff]
+    if dhkls[cutoff].size > 2:
+        hkls = hkls[cutoff]
+        dhkls = dhkls[cutoff]
+    if dhkls.size > orientation_num:
+        dhkls = dhkls[:orientation_num]
+        hkls = hkls[:orientation_num]
     y_dirs = np.array([get_cell_orientation(z_dir) for z_dir in hkls])
     semi_angles, _, _ = overlap_params(0.5, dhkls, voltage2Lambda(energy))
     sim_params['y_dirs'] = y_dirs

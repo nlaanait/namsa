@@ -26,7 +26,7 @@ def simulate(filehandle, cif_path, idx= None, gpu_id=0, clean_up=False):
     slab_t = sim_params['slab_t']
     sim_params['space_group']= spgroup_num
     sim_params['material'] = matname
-    energies = [100, 125, 150, 175, 200]
+    energies = np.arange(100,200,10)
     for (sample_idx, energy) in enumerate(energies):
         try:
             cbed_stack = []
@@ -75,23 +75,19 @@ def simulate(filehandle, cif_path, idx= None, gpu_id=0, clean_up=False):
                 wrong_shape = cbed.shape != (512, 512) 
                 if has_nan: 
                     print('rank=%d, skipped simulation=%s, index=%d, error=NaN' % (comm_rank, cif_path, sample_idx))
-                    break
+                    pass
                 elif wrong_shape:
                     print('rank=%d, skipped simulation=%s, index=%d, error=wrong cbed shape' % (comm_rank, cif_path, sample_idx))
-                    break
+                    pass
                 else:
                     cbed_stack.append(cbed)
 
 
             # write to h5 / tfrecords / lmdb
             if len(cbed_stack) != 3:
-                break
+                pass
             else:
                 cbed_stack = np.stack(cbed_stack)
-            if cbed_stack.shape != (3, 512, 512):
-                print('rank=%d, skipped simulation=%s, index=%d, error=Wrong cbed_stack Shape' % (comm_rank, cif_path, sample_idx))
-                break
-            else:
                 g = filehandle.create_group('sample_%d_%d' % (idx, sample_idx))
                 g.attrs['space_group'] = np.string_(sim_params['space_group'])
                 g.attrs['material'] = np.string_(sim_params['material'])
@@ -125,17 +121,19 @@ def generate_data(samples, outdir_path, mode='train', runtime=2000):
     num_sims = samples.size
     h5path = os.path.join(outdir_path, 'batch_%s_%d.h5'% (mode, comm_rank))
     mode = 'w'
-    with h5py.File(h5path, mode=mode) as f:
-        for (idx, cif_path) in enumerate(samples[comm_rank:num_sims:comm_size]):
-            manual = idx < ( num_sims - comm_size) 
-            spgroup_num, matname = parse_cif_path(cif_path)
-            if comm_rank == 0 and bool(idx % 100):
-                print('time=%3.2f, num_sims= %d' %(time() - t, idx * comm_size))
-            if (time() - t_elaps) < runtime:
-                simulate(f, cif_path, idx=idx, gpu_id=int(np.mod(comm_rank, 6)), clean_up=manual)
-            else:
-#                 f.flush()
-                break
+    f = h5py.File(h5path, mode=mode)
+    for (idx, cif_path) in enumerate(samples[comm_rank:num_sims:comm_size]):
+        manual = idx < ( num_sims - comm_size) 
+        spgroup_num, matname = parse_cif_path(cif_path)
+        if comm_rank == 0 and bool(idx % 100):
+            print('time=%3.2f, num_sims= %d' %(time() - t, idx * comm_size))
+        if (time() - t_elaps) < runtime:
+            simulate(f, cif_path, idx=idx, gpu_id=int(np.mod(comm_rank, 6)), clean_up=manual)
+        else:
+            f.flush()
+            f.close()
+            return
+    return
             
 def get_samples(cif_paths, ratio=0.9):
     samples = cif_paths
@@ -152,7 +150,8 @@ def get_samples(cif_paths, ratio=0.9):
         samples_train = samples[:train_size]
         samples_dev = samples[train_size:train_size + int(remain * train_size)]
         samples_test = samples[train_size + int(remain * train_size):]
-        print('samples sizes (train, dev, test): %d, %d, %d' %(samples_train.size, samples_dev.size, samples_test.size))
+        if comm_rank == 0:
+            print('samples sizes (train, dev, test): %d, %d, %d' %(samples_train.size, samples_dev.size, samples_test.size))
         return samples_train, samples_dev, samples_test
     return samples
          
@@ -161,11 +160,11 @@ def main(cifdir_path, outdir_path, runtime=1800):
     t_elaps = time()
     cif_paths = get_cif_paths(cifdir_path)
     samples_train, samples_dev, samples_test = get_samples(cif_paths, ratio=0.9)
-    generate_data(samples_train, outdir_path, mode='train', runtime=runtime*0.9)
+    generate_data(samples_train, outdir_path, mode='train', runtime=runtime*0.8)
     print('rank=%d, finished simulating training data' % comm_rank)
-    generate_data(samples_test, outdir_path, mode='dev', runtime=runtime*0.95)
+    generate_data(samples_dev, outdir_path, mode='dev', runtime=runtime*0.9)
     print('rank=%d, finished simulating dev data' % comm_rank)
-    generate_data(samples_dev, outdir_path, mode='test', runtime=runtime)
+    generate_data(samples_test, outdir_path, mode='test', runtime=runtime)
     print('rank=%d, finished simulating test data' % comm_rank)
     return
             
