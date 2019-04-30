@@ -91,7 +91,7 @@
          }
          __syncthreads();
 
-        if (col_idx < slice_size_x && row_idx < slice_size_y && stk_idx <= num_slices)
+        if (col_idx < slice_size_x && row_idx < slice_size_y && stk_idx < num_slices)
         {
              slice[stk_idx][row_idx][col_idx] = pycuda::complex<float>(cosf(slice[stk_idx][row_idx][col_idx]._M_re * sigma),
                                                                        sinf(slice[stk_idx][row_idx][col_idx]._M_re * sigma));

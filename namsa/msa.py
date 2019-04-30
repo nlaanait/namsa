@@ -504,9 +504,10 @@ class MSAGPU(MSAHybrid):
         block, grid = self._get_blockgrid([self.sampling[1], self.sampling[0], self.num_slices],
                     mode='3D')
         build_potential = self.pot_kernels['build_potential']
-        print("block:%s, grid:%s" %(format(block), format(grid)))
-        print("max, row idx:%d, col idx:%d, stk idx:%d" %(block[0]*grid[0], block[1]*grid[1], block[2]*grid[2]))
-        print("sites: %s" %format(Zxy_input.shape))
+        grid = (grid[0], grid[1], grid[2]*2)
+        # print("block:%s, grid:%s" %(format(block), format(grid)))
+        # print("max, row idx:%d, col idx:%d, stk idx:%d" %(block[0]*grid[0], block[1]*grid[1], block[2]*grid[2]))
+        # print("sites: %s" %format(Zxy_input.shape))
         # build potential
         build_potential(potential_slices_d, atom_pot_stack_d, sites_d,
                         np.float32(self.sigma), block=block, grid=grid)
