@@ -490,7 +490,7 @@ class MSAGPU(MSAHybrid):
         # allocate memory
         atom_pot_stack_d = cuda.to_device(atom_pot_stack)
         sites_d = cuda.to_device(Zxy_input)
-        self.potential_slices = cuda.aligned_empty((int(self.num_slices),
+        self.potential_slices = cuda.aligned_zeros((int(self.num_slices),
                     int(self.sampling[0]), int(self.sampling[1])), np.complex64)
         self.vars = []
         self.vars.append(self.potential_slices.base)
@@ -504,7 +504,9 @@ class MSAGPU(MSAHybrid):
         block, grid = self._get_blockgrid([self.sampling[1], self.sampling[0], self.num_slices],
                     mode='3D')
         build_potential = self.pot_kernels['build_potential']
-
+        print("block:%s, grid:%s" %(format(block), format(grid)))
+        print("max, row idx:%d, col idx:%d, stk idx:%d" %(block[0]*grid[0], block[1]*grid[1], block[2]*grid[2]))
+        print("sites: %s" %format(Zxy_input.shape))
         # build potential
         build_potential(potential_slices_d, atom_pot_stack_d, sites_d,
                         np.float32(self.sigma), block=block, grid=grid)
@@ -674,11 +676,11 @@ class MSAGPU(MSAHybrid):
 
         # allocate memory
         # self.probes = np.empty((self.num_probes, shape_y, shape_x), dtype=np.complex64)
-        self.propag = cuda.aligned_empty((int(self.sampling[0]), int(self.sampling[1])), np.complex64)
+        self.propag = cuda.aligned_zeros((int(self.sampling[0]), int(self.sampling[1])), np.complex64)
         self.vars.append(self.propag.base)
         self.propag = cuda.register_host_memory(self.propag)
         propag_d = cuda.to_device(self.propag)
-        self.mask = cuda.aligned_empty((int(self.sampling[0]), int(self.sampling[1])), np.float32)
+        self.mask = cuda.aligned_zeros((int(self.sampling[0]), int(self.sampling[1])), np.float32)
         self.vars.append(self.mask.base)
         self.mask = cuda.register_host_memory(self.mask)
         mask_d = cuda.to_device(self.mask)
@@ -690,7 +692,7 @@ class MSAGPU(MSAHybrid):
                                         dtype=np.complex64, mem_flags=cuda.mem_attach_flags.GLOBAL)
         else:
             # pinned memory is default
-            self.probes = cuda.aligned_empty((int(self.num_probes), int(self.sampling[0]), int(self.sampling[1])), np.complex64)
+            self.probes = cuda.aligned_zeros((int(self.num_probes), int(self.sampling[0]), int(self.sampling[1])), np.complex64)
             self.vars.append(self.probes.base)
             self.probes = cuda.register_host_memory(self.probes)
         ones = cuda.aligned_zeros((int(self.sampling[0]), int(self.sampling[1])), np.complex64) + 1
