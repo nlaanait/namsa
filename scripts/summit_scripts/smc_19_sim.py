@@ -8,17 +8,44 @@ from mpi4py import MPI
 from itertools import chain, product
 import tensorflow as tf
 import lmdb
+import pycuda.driver as cuda
+import pycuda 
 
 comm = MPI.COMM_WORLD
 comm_size = comm.Get_size()
 comm_rank = comm.Get_rank()
 
+def setup_device(gpu_rank=0):
+    global ctx
+    cuda.init()
+    dev = cuda.Device(gpu_rank)
+    ctx = dev.make_context()
+    import atexit
+    def _clean_up():
+        global ctx
+        if ctx is not None:
+            try:#global ctx
+                #ctx.push()
+                ctx.pop()
+                ctx.detach()
+                #ctx = None
+            except:
+                pass
+        from pycuda.tools import clear_context_caches
+        clear_context_caches()
+    atexit.register(_clean_up)
+    return ctx 
 
-
-def simulate(filehandle, cif_path, idx= None, gpu_id=0, clean_up=False):
+def simulate(filehandle, cif_path, idx= None, gpu_ctx=None, clean_up=False):
+    
     # load cif and get sim params
     spgroup_num, matname = parse_cif_path(cif_path)
     sp = SupercellBuilder(cif_path, verbose=False, debug=False)
+    latts = np.array(sp.structure.lattice.abc)
+    if np.any(latts >= 10.):
+        print('rank=%d, skipped simulation=%s, latt. const. too large=%s' % (comm_rank, cif_path, format(latts)))
+        return    
+         
     sim_params = get_sim_params(sp, grid_steps=np.array([8,8]), orientation_num=3)
     z_dirs = sim_params['z_dirs']
     y_dirs = sim_params['y_dirs']
@@ -27,6 +54,8 @@ def simulate(filehandle, cif_path, idx= None, gpu_id=0, clean_up=False):
     sim_params['space_group']= spgroup_num
     sim_params['material'] = matname
     energies = np.arange(100,200,10)
+    
+#     ctx = msa.setup_device(gpu_rank=gpu_id)
     for (sample_idx, energy) in enumerate(energies):
         try:
             cbed_stack = []
@@ -47,9 +76,9 @@ def simulate(filehandle, cif_path, idx= None, gpu_id=0, clean_up=False):
                 # simulate
                 msa = MSAGPU(energy, semi_angle, sp.supercell_sites, sampling=sampling,
                      verbose=False, debug=False)
-                ctx = msa.setup_device(gpu_rank=gpu_id)
+#                 ctx = msa.setup_device(gpu_rank=gpu_id)
                 msa.calc_atomic_potentials()
-                msa.build_potential_slices(slice_thickness)
+                msa.build_potential_slices(gpu_ctx, slice_thickness)
                 msa.build_probe(probe_dict=probe_params)
                 msa.generate_probe_positions(grid_steps=grid_steps) 
                 msa.plan_simulation()
@@ -57,24 +86,33 @@ def simulate(filehandle, cif_path, idx= None, gpu_id=0, clean_up=False):
 
                 # process cbed 
                 cbed = msa.probes.mean(0) 
-
+                pot_isnan = np.isnan(msa.potential_slices)
                 # update sim_params dict
                 sim_params = update_sim_params(sim_params, msa_cls=msa, sp_cls=sp)
 
                 # 
                 # clean-up context and/or allocated memory
-                if clean_up and ctx is not None:
-                    msa.clean_up(ctx=ctx, vars=msa.vars)
-                    del msa
-                else:
-                    msa.clean_up(ctx=None, vars=msa.vars)
-                    del msa
+                msa.clean_up(ctx=None, vars=msa.vars)
+#                 if clean_up and ctx is not None:
+#                     msa.clean_up(ctx=ctx, vars=msa.vars)
+# #                     del msa
+#                 else:
+#                     msa.clean_up(ctx=None, vars=msa.vars)
+# #                     del msa
 
                 # check data integrity
+#                 isnan = np.isnan(cbed)
+#                 print('cbed elements with nan', np.where(isnan == True)[0].size)
                 has_nan = np.all(np.isnan(cbed)) 
+#                 pot_isnan = np.isnan(msa.potential_slices)
+#                 print('pot elements with nan', np.where(pot_isnan == True)[0].size)
+                
+#                 if has_nan:
+# #                     print(z_dirs,y_dirs,sim_params['semi_angles'],sim_params['abc'], energy)
+#                     print('')
                 wrong_shape = cbed.shape != (512, 512) 
                 if has_nan: 
-                    print('rank=%d, skipped simulation=%s, index=%d, error=NaN' % (comm_rank, cif_path, sample_idx))
+                    print('rank=%d, skipped simulation=%s, index=%d, error=NaN, abc=%s' % (comm_rank, cif_path, sample_idx, format(sim_params['abc'])))
                     pass
                 elif wrong_shape:
                     print('rank=%d, skipped simulation=%s, index=%d, error=wrong cbed shape' % (comm_rank, cif_path, sample_idx))
@@ -106,8 +144,8 @@ def simulate(filehandle, cif_path, idx= None, gpu_id=0, clean_up=False):
             print("rank=%d, skipped simulation=%s, error=%s" % (comm_rank, cif_path, format(e)))
         finally:
             try:
-                if clean_up and ctx is not None:
-                    msa.clean_up(ctx=ctx, vars=msa.vars)
+                if clean_up and gpu_ctx is not None:
+                    msa.clean_up(ctx=gpu_ctx, vars=msa.vars)
                     del msa
                 else:
                     msa.clean_up(ctx=None, vars=msa.vars)
@@ -116,7 +154,7 @@ def simulate(filehandle, cif_path, idx= None, gpu_id=0, clean_up=False):
                 pass
         
 
-def generate_data(samples, outdir_path, mode='train', runtime=2000):
+def generate_data(samples, outdir_path, mode='train', runtime=2000, gpu_ctx=None):
     t = time()
     num_sims = samples.size
     h5path = os.path.join(outdir_path, 'batch_%s_%d.h5'% (mode, comm_rank))
@@ -128,11 +166,13 @@ def generate_data(samples, outdir_path, mode='train', runtime=2000):
         if comm_rank == 0 and bool(idx % 100):
             print('time=%3.2f, num_sims= %d' %(time() - t, idx * comm_size))
         if (time() - t_elaps) < runtime:
-            simulate(f, cif_path, idx=idx, gpu_id=int(np.mod(comm_rank, 6)), clean_up=manual)
+            simulate(f, cif_path, idx=idx, gpu_ctx=gpu_ctx, clean_up=False)
         else:
             f.flush()
             f.close()
             return
+    f.flush()
+    f.close()
     return
             
 def get_samples(cif_paths, ratio=0.9):
@@ -159,12 +199,13 @@ def main(cifdir_path, outdir_path, runtime=1800):
     global t_elaps
     t_elaps = time()
     cif_paths = get_cif_paths(cifdir_path)
+    ctx = setup_device(gpu_rank=int(np.mod(comm_rank, 6)))
     samples_train, samples_dev, samples_test = get_samples(cif_paths, ratio=0.9)
-    generate_data(samples_train, outdir_path, mode='train', runtime=runtime*0.8)
+    generate_data(samples_train, outdir_path, mode='train', runtime=runtime*0.8, gpu_ctx=ctx)
     print('rank=%d, finished simulating training data' % comm_rank)
-    generate_data(samples_dev, outdir_path, mode='dev', runtime=runtime*0.9)
+    generate_data(samples_dev, outdir_path, mode='dev', runtime=runtime*0.9, gpu_ctx=ctx)
     print('rank=%d, finished simulating dev data' % comm_rank)
-    generate_data(samples_test, outdir_path, mode='test', runtime=runtime)
+    generate_data(samples_test, outdir_path, mode='test', runtime=runtime, gpu_ctx=ctx)
     print('rank=%d, finished simulating test data' % comm_rank)
     return
             
