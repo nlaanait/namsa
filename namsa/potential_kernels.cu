@@ -95,8 +95,11 @@
         {
              slice[stk_idx][row_idx][col_idx] = pycuda::complex<float>(cosf(slice[stk_idx][row_idx][col_idx]._M_re * sigma),
                                                                        sinf(slice[stk_idx][row_idx][col_idx]._M_re * sigma));
-             if (isnan(slice[stk_idx][row_idx][col_idx]._M_re) || isnan(slice[stk_idx][row_idx][col_idx]._M_im)){
-                slice[stk_idx][row_idx][col_idx] = pycuda::complex<float>(1.f, 1.f); 
+             if (isnan(slice[stk_idx][row_idx][col_idx]._M_re)){
+                atomicExch(&slice[stk_idx][row_idx][col_idx]._M_re, 1.f);
+             } 
+             if (isnan(slice[stk_idx][row_idx][col_idx]._M_im)){
+                atomicExch(&slice[stk_idx][row_idx][col_idx]._M_im, 1.f);
              }
         }
 

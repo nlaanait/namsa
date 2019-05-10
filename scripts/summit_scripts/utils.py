@@ -1,12 +1,13 @@
 import numpy as np
 import sys, os, re
 from itertools import chain
-from namsa.scattering import get_kinematic_reflection, get_cell_orientation, overlap_params 
+from namsa.scattering import get_kinematic_reflection, overlap_params 
 from namsa.optics import voltage2Lambda
 import tensorflow as tf
 import h5py
 from scipy.ndimage import gaussian_filter
 from skimage.transform import resize
+from scipy.optimize import minimize
 
 def _bytes_feature(value):
     return tf.train.Feature(bytes_list=tf.train.BytesList(value=[value]))
@@ -106,7 +107,7 @@ def process_potential(pot_slices, normalize=True, mask=None, sampling=None, scal
     proj_potential = gaussian_filter(proj_potential,1.2)
     snapshot = slice(int(proj_potential.shape[0]// 4), int(3 * proj_potential.shape[1]//4))
     proj_potential = proj_potential[snapshot, snapshot]
-    proj_potential = resize(proj_potential,sampling, preserve_range=True, mode='constant', order=4)
+#     proj_potential = resize(proj_potential,sampling, preserve_range=True, mode='constant', order=4)
     #if mask is None:
     #    pass
         #mask = np.ones((sampling, sampling), dtype=np.bool)
@@ -129,9 +130,13 @@ def process_potential(pot_slices, normalize=True, mask=None, sampling=None, scal
     #    return proj_potential.astype(np.float16)
     return proj_potential
 
-def process_cbed(cbed, normalize=True, scale=[-1, 1], fp16=False):
-    #cbed = np.sqrt(cbed)
+def process_cbed(cbed, normalize=True, scale=[-1, 1], fp16=False, new_shape=None):
+#     cbed = np.sqrt(cbed)
     #cbed = cbed ** (1./3)
+#     cbed = cbed.reshape(new_shape)
+#     for i, itm in zip(range(1,cbed.shape[0],2), cbed[1::2]):
+#         cbed[i] = itm[::-1]
+#     cbed = cbed.reshape(-1,new_shape[-2],new_shape[-1])
     cbed = (cbed - np.mean(cbed, axis=(1,-1), keepdims=True))/np.std(cbed, axis=(1,-1), keepdims=True)
     #cbed = (cbed - np.min(cbed, axis=(1,-1), keepdims=True))/(np.max(cbed, axis=(1,-1), keepdims=True) - np.min(cbed, axis=(1,-1), keepdims=True))
     #cbed = cbed * (scale[-1] - scale[0]) + scale[0]
@@ -164,8 +169,16 @@ def update_sim_params(sim_params, msa_cls=None, sp_cls=None):
             sim_params['angles'] = str(e)
     return sim_params
 
+def get_cell_orientation(vec):
+    def func(x):
+        return np.abs(np.dot(vec,x))
+    res = minimize(func, np.array([-1,1,-1]), method='CG')
+    if np.sum(np.abs(res.x)) < 1e-4:
+        return np.array([1,0,0]) 
+    return res.x
+
 def get_sim_params(sp_cell, slab_t= 200, sampling=np.array([512,512]), d_cutoff=4, grid_steps=np.array([32, 32]),
-                   cell_dim = 100, energy=100e3, orientation_num=3, beam_overlap=1):
+                   cell_dim = 50, energy=100e3, orientation_num=3, beam_overlap=1):
     """
     return a dict object to set params of simulation and write to h5.
     """
@@ -175,7 +188,7 @@ def get_sim_params(sp_cell, slab_t= 200, sampling=np.array([512,512]), d_cutoff=
     hkls, dhkls = get_kinematic_reflection(sp_cell.structure, top=orientation_num)
     if hkls[0].size > 3: # hexagonal systems    
         hkls = np.array([[itm[0], itm[1], itm[-1]] for itm in hkls])
-    cutoff = dhkls < 5 # not considering less than 5 ang. d-spacing
+    cutoff = np.logical_and(dhkls < 5., dhkls > 1.) # not considering less than 5 ang. d-spacing
     if dhkls[cutoff].size > 1:
         hkls, dhkls = hkls[cutoff], dhkls[cutoff]
     y_dirs = np.array([get_cell_orientation(z_dir) for z_dir in hkls])

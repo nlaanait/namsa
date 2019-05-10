@@ -39,6 +39,33 @@ def unwrap(args):
         return msa.build_probe(probe_position=params[0], probe_dict=params[1])
 
 
+def setup_device(gpu_id=0):
+    global ctx
+    cuda.init()
+    dev = cuda.Device(gpu_id)
+    ctx = dev.make_context()
+    # ctx.attach()
+    gpu_id = gpu_id
+
+    import atexit
+    def _clean_up():
+        global ctx
+        if ctx is not None:
+            try:#global ctx
+                #ctx.push()
+                ctx.pop()
+                ctx.detach()
+                #ctx = None
+            except Exception as e:
+                warn(format(e))
+        from pycuda.tools import clear_context_caches
+        clear_context_caches()
+
+
+    atexit.register(_clean_up)
+    return ctx # return context in case of manual clean-up
+
+
 class MSA(object):
     def __init__(self, energy, semi_angle, supercell, sampling=np.array([512, 512]), max_angle=None, verbose=False,
                  debug=False, output_dir='', debye_waller=True):
