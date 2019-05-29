@@ -6,15 +6,25 @@ import numpy as np
 def read_lmdb(args):
     lmdb_path, delete = args[:]
     if delete:
-        env = lmdb.open(lmdb_path, map_size=int(100e9), readahead=False, readonly=False, writemap=False, lock=True)
+        env = lmdb.open(lmdb_path, map_size=int(100e9), readahead=False, readonly=False, 
+                        writemap=True, lock=True, map_async=True)
     else:
         env = lmdb.open(lmdb_path, readahead=False, readonly=True, writemap=False, lock=False)
-    num_samples = env.stat()['entries'] - 4 ## TODO: remove hard-coded # of headers by storing #_headers key
+    with env.begin(write=False) as txn:
+        input_shape = np.frombuffer(txn.get(b"input_shape"), dtype='int64')
+        output_shape = np.frombuffer(txn.get(b"output_shape"), dtype='int64')
+        input_dtype = np.dtype(txn.get(b"input_dtype").decode("ascii"))
+        output_dtype = np.dtype(txn.get(b"output_dtype").decode("ascii"))
+        output_name = txn.get(b"output_name").decode("ascii")
+        input_name = txn.get(b"input_name").decode("ascii")
+        num_headers = int.from_bytes(txn.get(b"header_entries"),"little")
+#     num_samples = (env.stat()['entries'] - 6)//2 ## TODO: remove hard-coded # of headers by storing #samples key, val
+    num_samples = int((env.stat()['entries'] - 6)/2)
     first_record = 0
-    records = np.arange(first_record, num_samples//2)
-    data_specs={'label_shape': [1,512,512], 'image_shape': [1024, 512, 512], 
-          'label_dtype':'float16', 'image_dtype': 'float16', 'label_key':'potential_', 'image_key': 'cbed_'}
-    print('file=%s, samples=%d' %(lmdb_path.split('/')[-1], num_samples//2))
+    records = np.arange(first_record, num_samples)
+    data_specs={'label_shape': list(output_shape), 'image_shape': list(input_shape),
+            'label_dtype':output_dtype, 'image_dtype': input_dtype, 'label_key':output_name, 'image_key': input_name}
+    print('file=%s, samples=%d' %(lmdb_path.split('/')[-1], num_samples))
     with env.begin(write=delete, buffers=True) as txn:
         for idx in records:
             image_key = bytes(data_specs['image_key']+str(idx), "ascii")
@@ -34,6 +44,8 @@ def read_lmdb(args):
                     label = np.random.uniform(low=0.0, high=1.0, size=data_specs['label_shape']).astype(data_specs['label_dtype']) 
                     txn.put(image_key, image.flatten().tostring())
                     txn.put(label_key, label.flatten().tostring())
+                    print('file=%s, sample=%d, replaced' %(lmdb_path.split('/')[-1], idx))
+                    env.sync()
 
 def main(lmdb_dir, delete=False):
     lmdb_files = os.listdir(lmdb_dir)
