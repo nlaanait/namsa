@@ -7,7 +7,6 @@ import sys, os, re, subprocess, shlex
 import h5py
 from mpi4py import MPI
 from itertools import chain
-import tensorflow as tf
 import lmdb
 import numpy as np
 import shutil
@@ -138,9 +137,6 @@ def simulate(filehandle, cif_path, idx= None, gpu_ctx=None, clean_up=False, reco
                     write_lmdb(filehandle, idx + counter , cbed, proj_potential, record_names=record_names)
                     print('rank=%d, wrote sim_index=%d' % (comm_rank, idx+counter))
                     counter += 1
-                elif isinstance(filehandle, tf.python_io.TFRecordWriter):
-                    write_tfrecord(filehandle, cbed, proj_potential, sim_params)
-
             # free-up gpu memory
             msa.clean_up(ctx=None, vars=msa.vars)
     return True, counter
@@ -182,24 +178,6 @@ def generate_data(cifpaths, outdir_path, save_mode="h5", data_mode="train", gpu_
                 else:
                     f.flush()
                     break
-    # TFRECORDS 
-    elif save_mode == "tfrecord":
-        tfrecpath = os.path.join(outdir_path, 'batch_%s_%d.tfrecords'% (data_mode, comm_rank))   
-        with tf.python_io.TFRecordWriter(tfrecpath) as tfrec:
-            for (idx, cif_path) in enumerate(cifpaths[comm_rank:num_sims:comm_size]):
-                manual = idx < ( num_sims - comm_size) 
-                spgroup_num, matname = parse_cif_path(cif_path)
-                if comm_rank == 0 and bool(idx % 500):
-                    print('time=%3.2f, num_sims= %d' %(time() - t, idx * comm_size))
-                try: 
-                    status, _ = simulate(tfrec, cif_path, gpu_ctx=gpu_ctx, clean_up=manual)
-                    if status:
-                        print('rank=%d, finished simulation=%s' % (comm_rank, cif_path.split('/')[-2:]))
-                    else:
-                        pass
-                        print("rank=%d, skipped simulation=%s, error=NaN" % (comm_rank, cif_path.split('/')[-2:]))
-                except Exception as e:
-                    print("rank=%d, skipped simulation=%s, error=%s" % (comm_rank, cif_path.split('/')[-2:], format(e)))
 
     # LMDB            
     elif save_mode == "lmdb":

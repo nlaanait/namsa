@@ -3,34 +3,11 @@ import sys, os, re
 from itertools import chain
 from namsa.scattering import get_kinematic_reflection, overlap_params 
 from namsa.optics import voltage2Lambda
-import tensorflow as tf
 import h5py
 from scipy.ndimage import gaussian_filter
 from skimage.transform import resize
 from scipy.optimize import minimize
 
-def _bytes_feature(value):
-    return tf.train.Feature(bytes_list=tf.train.BytesList(value=[value]))
-
-def _feature_fetch(cbed, potential, params):
-    '''
-    Returns a tf.train.Example that is written by TFRecordwriter
-    '''
-    example = tf.train.Example(features=tf.train.Features(feature={
-
-                        #labels
-                        'material':_bytes_feature(np.array(params['material']).tostring()),
-                        'space_group': _bytes_feature(np.array(params['space_group']).tostring()),
-                        'abc': _bytes_feature(np.array(params['abc']).tostring()),
-                        'angles': _bytes_feature(np.array(params['angles']).tostring()),
-                        'formula': _bytes_feature(np.array(params['formula']).tostring()),
-
-                        #potential
-                        '2d_potential': _bytes_feature(potential),
-          
-                        #image
-                        'cbed': _bytes_feature(cbed)}))
-    return example 
 
 def pop_DS(lst):
     for (i,itm) in enumerate(lst):
@@ -78,14 +55,6 @@ def write_h5(h5group, cbed, potential, params):
                     g.attrs[probe_key] = params['probe_params'][probe_key]
         else:
             g.attrs[key] = params[key]
-    return
-
-def write_tfrecord(tfrecord_writer, cbed, potential, params):
-    #serialize image
-    cbed = cbed.tostring()
-    potential = potential.tostring()
-    example = _feature_fetch(cbed, potential, params)
-    tfrecord_writer.write(example.SerializeToString()) 
     return
 
 def write_lmdb(txn, idx, cbed, potential, record_names=["2d_potential_", "cbed_"], params=None):
