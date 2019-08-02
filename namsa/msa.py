@@ -9,16 +9,15 @@ import ctypes
 import sys
 from warnings import warn, catch_warnings, simplefilter
 import os
-
 try:
     import pyfftw
 except:
     pyfftw=None
-import pycuda
 import pycuda.driver as cuda
+from pycuda import gpuarray
 import skcuda.fft as skfft
 import skcuda.cufft as cufft
-from time import time
+from time import time, sleep
 import h5py
 from mpi4py import MPI
 
@@ -44,27 +43,19 @@ def setup_device(gpu_id=0):
     cuda.init()
     dev = cuda.Device(gpu_id)
     ctx = dev.make_context()
-    # ctx.attach()
-    gpu_id = gpu_id
 
     import atexit
     def _clean_up():
-        global ctx
         if ctx is not None:
-            try:#global ctx
-                #ctx.push()
+            try:
                 ctx.pop()
                 ctx.detach()
-                #ctx = None
             except Exception as e:
                 warn(format(e))
         from pycuda.tools import clear_context_caches
         clear_context_caches()
-
-
     atexit.register(_clean_up)
-    return ctx # return context in case of manual clean-up
-
+    return ctx 
 
 class MSA(object):
     def __init__(self, energy, semi_angle, supercell, sampling=np.array([512, 512]), max_angle=None, verbose=False,
@@ -356,37 +347,11 @@ class MSA(object):
 
 
 class MSAHybrid(MSA):
-    def setup_device(self, gpu_rank=0):
-        global ctx
-        cuda.init()
-        dev = cuda.Device(gpu_rank)
-        ctx = dev.make_context()
-        # ctx.attach()
-        self.gpu_rank = gpu_rank
-
-        import atexit
-        def _clean_up():
-            global ctx
-            if ctx is not None:
-                try:#global ctx
-                    #ctx.push()
-                    ctx.pop()
-                    ctx.detach()
-                    #ctx = None
-                except:
-                    pass
-            from pycuda.tools import clear_context_caches
-            clear_context_caches()
-
-
-        atexit.register(_clean_up)
-        return ctx # return context in case of manual clean-up
-
     def plan_simulation(self, num_probes=None):
         if num_probes is None:
             num_probes = self.num_probes
         self.print_verbose('Simulation requested %d probes simultaneously.' % self.num_probes)
-        free_mem, tot_mem = pycuda.driver.mem_get_info()
+        free_mem, tot_mem = cuda.mem_get_info()
         free_mem = free_mem/1024e6  # in GB
         mem_alloc = num_probes * np.prod(self.sampling) * 8 / 1024e6 + self.potential_slices.nbytes / 1024e6
         self.print_verbose('mem_alloc: %2.3f' % mem_alloc)
@@ -425,9 +390,9 @@ class MSAHybrid(MSA):
         self.print_verbose('Spent %2.4f s building %d probes on cpu' % (sim_t, self.max_probes))
 
         # Copy over to device
-        trans_gpu = pycuda.gpuarray.to_gpu_async(slices)
-        mask_propag_gpu = pycuda.gpuarray.to_gpu_async(mask * propag)
-        probes_gpu = pycuda.gpuarray.to_gpu_async(self.probes)
+        trans_gpu = gpuarray.to_gpu_async(slices)
+        mask_propag_gpu = gpuarray.to_gpu_async(mask * propag)
+        probes_gpu = gpuarray.to_gpu_async(self.probes)
 
         # Setup fft plans
         # TODO: tile multiple fft plans
@@ -892,7 +857,7 @@ class MSAGPU(MSAHybrid):
 
 class MSAMPI(MSAGPU):
     def __init__(self, *args, **kwargs):
-        global comm
+        #global comm
         comm = MPI.COMM_WORLD
         self.size = comm.Get_size()
         self.rank = comm.Get_rank()

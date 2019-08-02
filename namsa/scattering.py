@@ -6,7 +6,7 @@ def get_kinematic_reflection(unit_cell, top=3):
     Find top hkl and d_hkl with highest intensity.
     """
     xrd = XRDCalculator().get_pattern(unit_cell)
-    hkls = np.array([list(itm.keys())[0] for itm in xrd.hkls])
+    hkls = np.array([itm[0]['hkl'] for itm in xrd.hkls])
     intens = xrd.y
     if top > intens.size:
         top = intens.size 
