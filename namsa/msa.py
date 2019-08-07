@@ -467,11 +467,12 @@ class MSAGPU(MSAHybrid):
                                             for Z, yx in zip(Z_arr, yx_arr)])
 
         # pad sites array to have equal num of element per slice
-        shapes = np.array([itm.shape for itm in Zxy_input])
-        pads = [(0, shapes.max() - itm.shape) for itm in Zxy_input]
-        padded = [np.pad(itm,pad,'constant',constant_values=-1) for pad, itm in zip(pads, Zxy_input)]
-        Zxy_input = np.vstack([np.pad(itm,pad,'constant',constant_values=-1) for pad, itm in zip(pads, Zxy_input)])
-
+        max_shape = np.max(np.array([itm.shape for itm in Zxy_input]))
+        pads = [(0, max_shape - itm.shape[0]) for itm in Zxy_input]
+        # padded = [np.pad(itm,pad,'constant',constant_values=-1) for pad, itm in zip(pads, Zxy_input)]
+        Zxy_input = np.vstack([np.pad(itm, pad, 'constant', constant_values=-1) for pad, itm in zip(pads, Zxy_input)])
+        Zxy_input = Zxy_input.astype(np.float32)
+        
         # stack atomic potentials of unique elements
         atom_pot_stack = np.array([self.cached_pots[uq_Z] for uq_Z in unique_Z]).astype(np.float32)
 
