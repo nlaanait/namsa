@@ -15,25 +15,46 @@ __inline__ __device__ int warpReduceSumSync(int val, int mask){
     return k_rad;
 }
 
- __inline__ __device__ float phase_shift(float k_max, int size_x, int size_y, int col_idx, int row_idx, int stk_idx,
-    int *grid_step, float *grid_range){
+//  __inline__ __device__ float phase_shift(float k_max, int size_x, int size_y, int col_idx, int row_idx, int stk_idx,
+//     int *grid_step, float *grid_range){
+//     const double pi = acos(-1.0);
+//     float kx = float(col_idx) * k_max/float(size_x - 1) - k_max/2.;
+//     float ky = float(row_idx) * k_max/float(size_y - 1) - k_max/2.;
+//     int grid_step_x = grid_step[0];
+//     int grid_step_y = grid_step[1];
+//     float grid_start_x = grid_range[0];
+//     float grid_end_x = grid_range[1];
+//     float grid_start_y = grid_range[2];
+//     float grid_end_y = grid_range[3];
+//     float ry_idx = rintf(floorf(stk_idx * 1.f  / grid_step_y));
+//     float rx_idx = stk_idx - ry_idx * grid_step_x;
+//     float ry = ry_idx * (grid_end_y - grid_start_y) / (grid_step_y - 1) + grid_start_y;
+//     float rx = rx_idx * (grid_end_x - grid_start_x) / (grid_step_x - 1) + grid_start_x;
+//     float kr = - kx * rx - ky * ry;
+//     return kr;
+// }
+
+ __inline__ __device__ float phase_shift(float k_max, int size_x, int size_y, int col_idx, int row_idx, 
+    int *grid_step, float grid_range[2]){
     const double pi = acos(-1.0);
     float kx = float(col_idx) * k_max/float(size_x - 1) - k_max/2.;
     float ky = float(row_idx) * k_max/float(size_y - 1) - k_max/2.;
-    int grid_step_x = grid_step[0];
-    int grid_step_y = grid_step[1];
-    float grid_start_x = grid_range[0];
-    float grid_end_x = grid_range[1];
-    float grid_start_y = grid_range[2];
-    float grid_end_y = grid_range[3];
-    float ry_idx = rintf(floorf(stk_idx * 1.f  / grid_step_y));
-    float rx_idx = stk_idx - ry_idx * grid_step_x;
-    float ry = ry_idx * (grid_end_y - grid_start_y) / (grid_step_y - 1) + grid_start_y;
-    float rx = rx_idx * (grid_end_x - grid_start_x) / (grid_step_x - 1) + grid_start_x;
+    // int grid_step_x = grid_step[0];
+    // int grid_step_y = grid_step[1];
+    // float grid_start_x = grid_range[0];
+    // float grid_end_x = grid_range[1];
+    // float grid_start_y = grid_range[2];
+    // float grid_end_y = grid_range[3];
+    // float ry_idx = rintf(floorf(stk_idx * 1.f  / grid_step_y));
+    // float rx_idx = stk_idx - ry_idx * grid_step_x;
+    // float ry = ry_idx * (grid_end_y - grid_start_y) / (grid_step_y - 1) + grid_start_y;
+    // float rx = rx_idx * (grid_end_x - grid_start_x) / (grid_step_x - 1) + grid_start_x;
+    float rx = grid_range[1];
+    float ry = grid_range[0];
+    // printf(rx, ry);
     float kr = - kx * rx - ky * ry;
     return kr;
 }
-
 
 //TODO: 2d vectorize the indexing [idx]
 __global__ void norm_const_stack(pycuda::complex<float> arr[][{{x_sampling}} * {{y_sampling}}], float *norm, int size_z) {
@@ -179,6 +200,7 @@ __global__ void soft_aperture(float *arr, float k_max, float k_semi, int size_x,
     float k_rad = calc_krad(k_max, size_x, size_y, col_idx, row_idx);
     if (row_idx < size_y && col_idx < size_x)
     {
+        // Note that the smoothing factor is fixed at 80 so comparison with CPU results need to match it
         arr[idx] = 1.f / (1.f + expf(- 2.f * 80.f * (k_semi - k_rad)));
     }
 }
@@ -199,16 +221,32 @@ __global__ void spherical_phase_error(pycuda::complex<float> *arr, float k_max, 
     }
 }
 
+// __global__ void build_probes_stack(pycuda::complex<float> psi_pos[][{{y_sampling}}][{{x_sampling}}],
+//                     pycuda::complex<float> psi_k[{{y_sampling}}][{{x_sampling}}],
+//                     int z_size, float k_max, int *grid_step, float *grid_range){
+//     const double pi = acos(-1.0);
+//     unsigned col_idx = blockIdx.x*blockDim.x + threadIdx.x;
+//     unsigned row_idx = blockIdx.y*blockDim.y + threadIdx.y;
+//     unsigned stk_idx = blockIdx.z*blockDim.z + threadIdx.z;
+//     if (col_idx < {{x_sampling}} && row_idx < {{y_sampling}} && stk_idx < z_size)
+//     {
+//         float kr = phase_shift(k_max, {{x_sampling}}, {{y_sampling}}, col_idx, row_idx, stk_idx, grid_step, grid_range);
+//         psi_pos[stk_idx][row_idx][col_idx]  = pycuda::complex<float>(cosf(2 * pi * kr), sinf(2 * pi * kr));
+//         psi_pos[stk_idx][row_idx][col_idx] *= psi_k[row_idx][col_idx];
+//     }
+// }
+
 __global__ void build_probes_stack(pycuda::complex<float> psi_pos[][{{y_sampling}}][{{x_sampling}}],
                     pycuda::complex<float> psi_k[{{y_sampling}}][{{x_sampling}}],
-                    int z_size, float k_max, int *grid_step, float *grid_range){
+                    int z_size, float k_max, int *grid_step, float grid_positions[][2]){
     const double pi = acos(-1.0);
     unsigned col_idx = blockIdx.x*blockDim.x + threadIdx.x;
     unsigned row_idx = blockIdx.y*blockDim.y + threadIdx.y;
     unsigned stk_idx = blockIdx.z*blockDim.z + threadIdx.z;
     if (col_idx < {{x_sampling}} && row_idx < {{y_sampling}} && stk_idx < z_size)
     {
-        float kr = phase_shift(k_max, {{x_sampling}}, {{y_sampling}}, col_idx, row_idx, stk_idx, grid_step, grid_range);
+        // float kr = phase_shift(k_max, {{x_sampling}}, {{y_sampling}}, col_idx, row_idx, stk_idx, grid_step, grid_range);
+        float kr = phase_shift(k_max, {{x_sampling}}, {{y_sampling}}, col_idx, row_idx, grid_step, grid_positions[stk_idx]); 
         psi_pos[stk_idx][row_idx][col_idx]  = pycuda::complex<float>(cosf(2 * pi * kr), sinf(2 * pi * kr));
         psi_pos[stk_idx][row_idx][col_idx] *= psi_k[row_idx][col_idx];
     }

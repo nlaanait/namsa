@@ -5,6 +5,7 @@
      __global__ void BuildScatteringPotential(pycuda::complex<float> slice[][{{y_sampling}}][{{x_sampling}}],
                                   float atom_pot_stack[][{{pot_shape_y}}][{{pot_shape_x}}],
                                   float sites[][{{sites_size}}],
+                                  // sites[] !!!
                                   float sigma)
 
      {
